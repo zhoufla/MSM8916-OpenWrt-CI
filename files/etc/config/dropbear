@@ -1,0 +1,8 @@
+# See https://openwrt.org/docs/guide-user/base-system/dropbear
+# 不设置 DirectInterface：绑定 lan 会导致改网络/热重启后 SSH 直接失联，
+# 且局域网侧完全无法登录。监听全部地址 + 防火墙放行才是可用的组合。
+config dropbear
+	option enable '1'
+	option PasswordAuth 'on'
+	option RootPasswordAuth 'on'
+	option Port '22'

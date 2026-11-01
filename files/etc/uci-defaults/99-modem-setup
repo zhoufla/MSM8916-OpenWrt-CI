@@ -1,0 +1,4 @@
+#!/bin/sh
+chmod +x /etc/init.d/auto_apn
+/etc/init.d/auto_apn enable
+exit 0

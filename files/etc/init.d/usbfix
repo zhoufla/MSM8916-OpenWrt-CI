@@ -1,0 +1,112 @@
+#!/bin/sh /etc/rc.common
+# usbfix v4 - USB 数据通道自愈
+#
+# 实测根因（2026-11-01）：
+#   gadget 描述符 bmAttributes=0x80（仅总线供电，未启用远程唤醒），
+#   而 Windows 的 "USB 选择性暂停" 是开启的。主机一旦挂起总线，设备无法发
+#   remote wakeup，UDC 停在 state=suspended：
+#   Windows 网卡仍显示 Up / Connected / 426Mbps，但两侧 rx/tx 全为 0，
+#   必须拔插（或解绑重绑 UDC）才恢复。实测重绑后 suspended -> configured。
+#
+# v4 关键修正：按 UDC 状态分流，区分"主机挂起"和"根本没有主机"。
+#   接充电器时没有任何 host，state 会停在 not attached / powered，
+#   v3 会误判成故障、把 6 次重绑预算在 2 分钟内烧光，之后真出问题时反而不救了。
+#   v4 只在 suspended 时重绑；configured 时重置预算。
+#
+# 注意：不能用 ping -I usb0 —— usb0 是网桥端口、无 IP，这样测永远失败。
+
+START=99
+STOP=10
+GADGET=/sys/kernel/config/usb_gadget/g1
+UDC_SYS=/sys/class/udc/ci_hdrc.0
+LOG=/root/usbdiag.log
+MAX_REBIND=6
+
+log() { echo "$(date +%H:%M:%S) $*" >> "$LOG"; }
+
+udc_name() {
+	local u
+	u=$(cat "$GADGET/UDC" 2>/dev/null | tr -d ' \n')
+	[ -z "$u" ] && u=ci_hdrc.0
+	echo "$u"
+}
+
+reenumerate() {
+	local u
+	u=$(udc_name)
+	logger -t usbfix "re-enumerate on $u (state=$(cat $UDC_SYS/state 2>/dev/null))"
+	log "re-enumerate on $u state=$(cat $UDC_SYS/state 2>/dev/null)"
+	echo "" > "$GADGET/UDC" 2>/dev/null
+	sleep 2
+	echo "$u" > "$GADGET/UDC" 2>/dev/null
+	sleep 6
+}
+
+host_ip() {
+	awk 'NF>=3 {print $3}' /tmp/dhcp.leases 2>/dev/null | grep -E '^192\.168\.68\.' | head -1
+}
+
+start() {
+	[ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ] && mv "$LOG" "$LOG.1"
+	echo "########## usbfix v4 boot @ $(date) ##########" >> "$LOG"
+	(
+		sleep 15
+		stfail=0; pfail=0; rebinds=0; idle=0; cticks=0
+		while :; do
+			state=$(cat "$UDC_SYS/state" 2>/dev/null)
+			br=$(basename "$(readlink /sys/class/net/usb0/master 2>/dev/null)" 2>/dev/null)
+			[ -d /sys/class/net/usb0 ] && [ "$br" != "br-lan" ] && {
+				ip link set usb0 master br-lan 2>/dev/null
+				ip link set usb0 up 2>/dev/null
+				log "usb0 not bridged (br=$br), added"
+			}
+
+			hip=$(host_ip)
+			case "$state" in
+			configured)
+				# 有主机且枚举完成：正常。
+				# 预算只在"连续正常 10 分钟"后才恢复，否则挂起-重绑-再挂起
+				# 会变成无限重绑（每 20s 一次），把 USB 链路反复打断。
+				stfail=0; idle=0; cticks=$((cticks+1))
+				[ "$cticks" -ge 60 ] && [ "$rebinds" -ne 0 ] && {
+					rebinds=0
+					log "link healthy for 10min, rebind budget restored"
+				}
+				if [ -n "$hip" ] && ! ping -c1 -W1 "$hip" >/dev/null 2>&1; then
+					pfail=$((pfail+1))
+				else
+					pfail=0
+				fi
+				;;
+			suspended)
+				# 主机在、但总线被挂起 —— 这正是要救的场景
+				pfail=0; idle=0; cticks=0
+				stfail=$((stfail+1))
+				;;
+			*)
+				# 没有主机（接充电器 / 没插线）或过渡态：什么都不做
+				stfail=0; pfail=0; cticks=0
+				idle=$((idle+1))
+				[ $((idle % 30)) -eq 1 ] && log "idle state=${state:-none} (no host attached)"
+				;;
+			esac
+
+			# 只在需要救的时候记一行，避免刷日志
+			[ "$state" = "suspended" ] || [ "$pfail" -gt 0 ] && \
+				log "state=$state stfail=$stfail host=${hip:-none} pfail=$pfail rebinds=$rebinds"
+
+			if { [ "$stfail" -ge 2 ] || [ "$pfail" -ge 4 ]; } && [ "$rebinds" -lt "$MAX_REBIND" ]; then
+				rebinds=$((rebinds+1))
+				reenumerate
+				stfail=0; pfail=0
+				log "after re-enumerate: state=$(cat "$UDC_SYS/state" 2>/dev/null) tx=$(cat /sys/class/net/usb0/statistics/tx_packets 2>/dev/null)"
+			fi
+
+			sleep 10
+		done
+	) &
+}
+
+stop() {
+	:
+}

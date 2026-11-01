@@ -1,0 +1,89 @@
+#!/bin/sh
+# jz02v10 首次启动配置
+# 上行：WiFi STA(metric 5) 优先，LTE(metric 10) 备用
+# 无线本身由 files/etc/config/wireless 静态提供（STA 模式，无 AP）
+
+# 1) LTE 作为备用 WAN
+uci -q delete network.modem
+uci set network.modem=interface
+uci set network.modem.proto='modemmanager'
+uci set network.modem.device='qcom-soc'
+uci set network.modem.apn='cmnet'
+uci set network.modem.iptype='ipv4'
+uci set network.modem.auth='none'
+uci set network.modem.metric='10'
+uci commit network
+
+# 2) WiFi STA 作为首选 WAN
+uci -q delete network.wifiwan
+uci set network.wifiwan=interface
+uci set network.wifiwan.proto='dhcp'
+uci set network.wifiwan.metric='5'
+uci commit network
+
+# 3) 两个上行都进 wan 防火墙区（NAT 生效）
+uci -q delete firewall.@zone[1].network
+uci add_list firewall.@zone[1].network='wan'
+uci add_list firewall.@zone[1].network='wan6'
+uci add_list firewall.@zone[1].network='modem'
+uci add_list firewall.@zone[1].network='wifiwan'
+uci add_list firewall.@zone[1].network='wifiwan6'
+uci commit firewall
+
+# 4) 入站/转发全放行（用户指定）。注意这同时作用于 LTE 侧，介意就改回 REJECT。
+#    关键：defaults 只是兜底，**区域策略优先于它**。wan 区原来 input=REJECT，
+#    所以只改 defaults 的话，从家里局域网仍然进不来（v4 的 bug）。
+uci set firewall.@defaults[0].input='ACCEPT'
+uci set firewall.@defaults[0].output='ACCEPT'
+uci set firewall.@defaults[0].forward='ACCEPT'
+uci set firewall.@zone[1].input='ACCEPT'
+uci set firewall.@zone[1].output='ACCEPT'
+uci set firewall.@zone[1].forward='ACCEPT'
+uci set firewall.@zone[1].masq='1'
+uci commit firewall
+
+# 5) 关掉用不上的重型服务
+for s in docker dockerd istore appfilter 3proxy radius relayd etherwake \
+         packet_steering sta_wifi simadmin simadmin-data simadmin-watchdog simadmin-imsd \
+         cpu-perf qmi_auto_activate; do
+	[ -x /etc/init.d/$s ] && /etc/init.d/$s disable >/dev/null 2>&1
+done
+rm -f /etc/rc.d/S25docker /etc/rc.d/S99dockerd /etc/rc.d/S91cpu-perf 2>/dev/null
+
+# 6) 移除厂商的 LED 状态指示（modem ifup 点亮 blue:wan、lan ifup 把 green 设成 phy0rx）。
+#    改由 /etc/init.d/jz02-led 统一接管：只留电源灯，其余默认关闭。
+rm -f /etc/hotplug.d/iface/99-wifi-led 2>/dev/null
+
+# 7) 启用本地服务
+for s in auto_apn usbfix jz02-led jz02-power smsrelay; do
+	[ -x /etc/init.d/$s ] || continue
+	chmod +x /etc/init.d/$s
+	/etc/init.d/$s enable >/dev/null 2>&1
+done
+
+# 8) IPv6：只给设备自己用（DDNS 用），LAN 不分发、不下发 RA。
+#    wifiwan6 走 DHCPv6 拿地址 + PD；设备在 phy0-sta0 上有公网 v6 即可。
+#    实测：IA_NA 2409:8a60:2420:83a0::6e7/128，PD 2409:8a60:2420:83ac::/62
+#    （PD 只是顺带拿到，不用它给 LAN 分前缀）。
+uci -q delete network.lan.ip6assign
+uci -q delete network.lan.ip6hint
+
+uci -q delete network.wifiwan6
+uci set network.wifiwan6=interface
+uci set network.wifiwan6.proto='dhcpv6'
+uci set network.wifiwan6.device='phy0-sta0'
+uci set network.wifiwan6.reqaddress='try'
+uci set network.wifiwan6.reqprefix='disabled'
+uci set network.wifiwan6.metric='5'
+uci -q set network.modem.ipv6='0'
+uci commit network
+
+# LAN 不做 IPv6，也就没有 RA / DHCPv6 服务（odhcpd 已从固件移除）
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ra_slaac='0'
+uci -q delete dhcp.lan.ra_default
+uci -q delete dhcp.lan.ra_management
+uci commit dhcp
+
+exit 0

@@ -1,0 +1,42 @@
+{
+  "luci-app-jz02": {
+    "description": "Grant access to jz02 CPU frequency / temperature page",
+    "read": {
+      "file": {
+        "/sys/devices/system/cpu/cpufreq/policy0/*": [
+          "read"
+        ],
+        "/sys/class/thermal/thermal_zone*/type": [
+          "read"
+        ],
+        "/sys/class/thermal/thermal_zone*/temp": [
+          "read"
+        ],
+        "/sys/devices/virtual/thermal/thermal_zone*/type": [
+          "read"
+        ],
+        "/sys/devices/virtual/thermal/thermal_zone*/temp": [
+          "read"
+        ]
+      },
+      "ubus": {
+        "file": [
+          "read"
+        ]
+      },
+      "uci": [
+        "jz02"
+      ]
+    },
+    "write": {
+      "uci": [
+        "jz02"
+      ],
+      "ubus": {
+        "rc": [
+          "init"
+        ]
+      }
+    }
+  }
+}

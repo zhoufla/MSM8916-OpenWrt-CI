@@ -1,0 +1,116 @@
+#!/bin/sh /etc/rc.common
+# auto_apn - wait for the MSM8916 modem, pick the APN from IMSI, bring up network.modem
+#
+# 2026-11-01 修正（jz02v10）：
+#  1) 原版最多等 60s。实测本机 MPSS 开机后会在 ~63s / ~104s 各 watchdog 崩一次
+#     (qcom-q6v5-mss: fatal error received: dog.c:1498)，稳定下来已 >150s，
+#     原版早就放弃 → 开机没有 WAN。
+#  2) 原版只 ifup 一次。现在改成循环重试，直到 wwan0 真的拿到 IPv4。
+#  3) start() 里 fork 到后台，避免阻塞 rc 收尾。
+#  4) 顺带修了上级 99-modem-setup 里 enable 的名字写错（auto-apn vs auto_apn）的问题，
+#     本脚本自身即被 enable，不再依赖那个脚本。
+
+START=99
+STOP=10
+
+SECTION="modem"
+APN_IFACE="wwan0"
+
+find_modem() {
+	local i=0 M
+	while [ $i -lt 120 ]; do
+		M=$(mmcli -L 2>/dev/null | grep -o 'Modem/[0-9]*' | cut -d/ -f2 | head -1)
+		[ -n "$M" ] && { echo "$M"; return 0; }
+		sleep 3
+		i=$((i + 1))
+	done
+	return 1
+}
+
+iface_up() {
+	ip -4 addr show "$APN_IFACE" 2>/dev/null | grep -q "inet "
+}
+
+pick_apn() {
+	case "$1" in
+	46000|46002|46004|46007|46008) echo "cmnet|none||" ;;
+	46001|46006|46009)             echo "3gnet|none||" ;;
+	46003|46011|46012)             echo "ctnet|both|ctnet@mycdma.cn|vnet.mobi" ;;
+	46015|46022|46123)             echo "cbnet|none||" ;;
+	*)                             echo "" ;;
+	esac
+}
+
+worker() {
+	local M STATE SIM_ID IMSI CODE APN AUTH USER PASS i
+
+	logger -t auto-apn "waiting for modem (MPSS may crash 1-2 times at boot)"
+	M=$(find_modem) || { logger -t auto-apn "no modem after 6min, giving up"; return 0; }
+	logger -t auto-apn "modem $M found"
+
+	i=0
+	while [ $i -lt 20 ]; do
+		STATE=$(mmcli -m "$M" 2>/dev/null | sed -n 's/.*state: *\([a-z-]*\).*/\1/p' | head -1)
+		[ -n "$STATE" ] && break
+		sleep 5
+		i=$((i + 1))
+	done
+	[ "$STATE" = "disabled" ] && mmcli -m "$M" --enable >/dev/null 2>&1
+	sleep 5
+
+	i=0
+	SIM_ID=""
+	while [ -z "$SIM_ID" ] && [ $i -lt 20 ]; do
+		SIM_ID=$(mmcli -m "$M" 2>/dev/null | sed -n 's|.*primary sim path: *.*/\([0-9]*\)$|\1|p' | head -1)
+		[ -z "$SIM_ID" ] && sleep 3
+		i=$((i + 1))
+	done
+	logger -t auto-apn "sim id: ${SIM_ID:-none}"
+
+	IMSI=""
+	if [ -n "$SIM_ID" ]; then
+		i=0
+		while [ -z "$IMSI" ] && [ $i -lt 20 ]; do
+			IMSI=$(mmcli -i "$SIM_ID" 2>/dev/null | sed -n 's/.*imsi: *\([0-9]*\).*/\1/p' | head -1)
+			[ -z "$IMSI" ] && sleep 3
+			i=$((i + 1))
+		done
+	fi
+
+	CODE=$(echo "$IMSI" | cut -c1-5)
+	APN=$(pick_apn "$CODE")
+	if [ -n "$APN" ]; then
+		AUTH=${APN#*|}
+		APN=${APN%%|*}
+		USER=$(echo "$AUTH" | cut -d'|' -f2)
+		PASS=$(echo "$AUTH" | cut -d'|' -f3)
+		AUTH=$(echo "$AUTH" | cut -d'|' -f1)
+		logger -t auto-apn "imsi=$IMSI apn=$APN auth=$AUTH"
+		uci set network.$SECTION.apn="$APN"
+		uci set network.$SECTION.username="$USER"
+		uci set network.$SECTION.password="$PASS"
+		uci set network.$SECTION.auth="$AUTH"
+		uci commit network
+	else
+		logger -t auto-apn "imsi=$IMSI unknown operator, keep existing apn"
+	fi
+
+	i=0
+	while [ $i -lt 40 ]; do
+		if iface_up; then
+			logger -t auto-apn "$APN_IFACE is up after $i attempt(s)"
+			return 0
+		fi
+		/sbin/ifup "$SECTION" >/dev/null 2>&1
+		sleep 10
+		i=$((i + 1))
+	done
+	logger -t auto-apn "FAILED: $APN_IFACE never got an address"
+}
+
+start() {
+	logger -t auto-apn "spawning worker"
+	worker >/dev/null 2>&1 &
+}
+
+stop() { :; }

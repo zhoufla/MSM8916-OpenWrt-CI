@@ -1,0 +1,4 @@
+# 复制成 secrets/wifi.conf 后填写（secrets/ 已在 .gitignore 里）
+WIFI_SSID=MyHome
+WIFI_PSK=your-password
+WIFI_ENC=psk2
