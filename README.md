@@ -7,8 +7,9 @@ openstick 移植生态。
 特性（相对上游 openstick 镜像的定制；jz02v10 经真机验证，sp970v11 见「机型」表）：
 
 - **精简**：剔除 docker/istore/simadmin 等无关包（423 → 357 CONFIG），system.img 约 43MB
-- **基带内置**：jz02v10 / sp970v11 原厂基带（MBA+MPSS，24 文件/机型）随仓库分发，
-  构建期解压到 `/lib/firmware`；本地缺失的机型自动回退远程 openstick feed（见「基带固件」）
+- **基带内置**：jz02v10 / sp970v11 原厂基带（MBA+MPSS，24 文件/机型）**从真机提取**
+  后随仓库分发，构建期解压到 `/lib/firmware`；本地缺失的机型自动回退远程 openstick
+  feed（见「基带固件」）
 - **短信网关**：内置 [SMSRelay](https://github.com/zhoufla/SMSRelay8916)（收发、验证码提取、
   多通道转发），procd 双实例托管，LuCI「服务 → 短信网关」嵌入其自带 UI
 - **LTE 保活**：MPSS（2015）在 LTE 空闲态收不到寻呼会导致短信延迟，keepalive 实例周期保活
@@ -78,6 +79,7 @@ files/                     # 根文件系统覆盖层（服务、LuCI、uci-defa
 firmware/                  # 项目内置基带（firmware/<model>/*.xz）
 jz02/wireless.tpl          # 无线配置模板（占位符）
 scripts/gen-wireless.sh    # 模板渲染（CI 与本地共用）
+scripts/pull-modemfw.sh    # 基带真机提取（ssh → firmware/，md5 校验）
 scripts/fat_extract.py     # 原厂 modem 分区 FAT 镜像抽取工具
 scripts/sync-modemfw.sh    # 基带同步（qcom-firmware → firmware/）
 .github/workflows/         # Actions 工作流
@@ -86,10 +88,11 @@ scripts/sync-modemfw.sh    # 基带同步（qcom-firmware → firmware/）
 ## 基带固件（modem）
 
 OpenWrt 只构建内核和 rootfs；MSM8916 的基带（MBA + MPSS）是高通闭源固件，来自设备
-原厂系统的 modem 分区，由 openstick 社区 dump 成 FAT 镜像托管在
-[lkiuyu/qcom-firmware](https://github.com/lkiuyu/qcom-firmware)。本项目把
-jz02v10 / sp970v11 的基带（`mba.mbn` + `modem.*`，24 个文件/机型，xz 压缩）内置在
-`firmware/<model>/`，build.sh 第 7 步的处理逻辑：
+原厂系统。本项目内置的基带**直接从真机提取**（`/lib/firmware/mba.mbn` + `modem.*`，
+24 个文件/机型，xz 压缩）放在 `firmware/<model>/`；社区 dump
+（[lkiuyu/qcom-firmware](https://github.com/lkiuyu/qcom-firmware)）仅作参考来源——
+实测 sp970v11 真机与社区 dump 有 4 个文件不同（`modem.mdt`、`modem.b01/b20/b21`），
+以真机为准。build.sh 第 7 步的处理逻辑：
 
 1. `firmware/<MODEL>/` 存在 → 解压到 rootfs 的 `files/lib/firmware/`，并从
    `DEVICE_PACKAGES` 摘掉远程 `qcom-msm8916-modem-openstick-<model>-firmware` 包，
@@ -101,7 +104,18 @@ jz02v10 / sp970v11 的基带（`mba.mbn` + `modem.*`，24 个文件/机型，xz 
 提供 EFS/NV 存储。刷机/升级只写 boot/rootfs 分区，基带与 NV 始终保持出厂状态。
 WiFi/BT 固件（`wcnss.*`）与校准 NV 未内置，仍来自上游 feed 包。
 
-### 新增/更新机型基带
+### 从真机提取基带（推荐）
+
+```sh
+FW_PASS=<设备root密码> ./scripts/pull-modemfw.sh <model> <设备地址>
+# 例: FW_PASS=xxx ./scripts/pull-modemfw.sh jz02v10 192.168.1.1
+```
+
+设备需已运行 openstick / ImmortalWrt 且可 root 登录。脚本 tar over ssh 拉取
+`/lib/firmware` 的基带文件，**逐文件 md5 与设备端校验一致后**才替换
+`firmware/<model>/`；密码仅经环境变量传入，不落盘、不进仓库。需 ssh、tar、md5sum、xz。
+
+### 从社区 dump 同步（补充）
 
 ```sh
 ./scripts/sync-modemfw.sh jz02v10 sp970v11   # 需 curl、python3、xz
@@ -109,7 +123,8 @@ WiFi/BT 固件（`wcnss.*`）与校准 NV 未内置，仍来自上游 feed 包�
 
 脚本从固定 commit（`FW_COMMIT=xxx` 可覆盖）下载对应机型的
 `openstick-<model>-modem.bin`（原厂 modem 分区镜像），用 `scripts/fat_extract.py`
-抽取基带后 `xz -9` 入库，来源可复现。
+抽取基带后 `xz -9` 入库，来源可复现。注意 dump 可能与真机有出入（见上），入库后
+建议再用 `pull-modemfw.sh` 以真机覆盖。
 
 ## 已知坑（build.sh 已内置处理）
 
