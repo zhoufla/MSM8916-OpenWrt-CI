@@ -30,10 +30,13 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      # 机型过滤只能写在 matrix 里：job 级 if 在 matrix 展开之前求值，
+      # 在那里引用 matrix.* 会被判为 Unrecognized named-value: 'matrix'，整个工作流直接无效。
+      # 下面用 && / || 链按字符串分支（不依赖 inputs.model == '' 判等，
+      # 定时 / tag 触发时 inputs 上下文为空，判等结果不可靠）。
+      # 未选或选 both -> 两机型并行；选单一机型 -> 单元素矩阵。
       matrix:
-        model: [jz02v10, sp970v11]
-    # 手动触发按所选机型过滤；定时 / tag 触发时 inputs.model 为空，两个机型都编译
-    if: ${{ inputs.model == '' || inputs.model == 'both' || inputs.model == matrix.model }}
+        model: ${{ fromJSON(inputs.model == 'jz02v10' && '["jz02v10"]' || inputs.model == 'sp970v11' && '["sp970v11"]' || '["jz02v10","sp970v11"]') }}
     steps:
       - uses: actions/checkout@v4
 
