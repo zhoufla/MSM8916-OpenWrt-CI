@@ -55,23 +55,31 @@ rm -f /etc/rc.d/S25docker /etc/rc.d/S99dockerd /etc/rc.d/S91cpu-perf 2>/dev/null
 rm -f /etc/hotplug.d/iface/99-wifi-led 2>/dev/null
 
 # 7) 启用本地服务
-for s in auto_apn usbfix jz02-led jz02-power smsrelay; do
+#    wifiwan-ensure：msm8916 的 modem/wcnss/wcn36xx 都是模块，phy0 要 20s 左右才出现，
+#    而 netifd 在 S20 就给 wifiwan 做 ifup，抢在 phy 之前只会记一条 NO_DEVICE 且不重试，
+#    表现是"无线关联上了、WAN 没有 IPv4"。该服务在 S95 兜底补 ifup。
+for s in auto_apn usbfix jz02-led jz02-power smsrelay wifiwan-ensure; do
 	[ -x /etc/init.d/$s ] || continue
 	chmod +x /etc/init.d/$s
 	/etc/init.d/$s enable >/dev/null 2>&1
 done
 
 # 8) IPv6：只给设备自己用（DDNS 用），LAN 不分发、不下发 RA。
-#    wifiwan6 走 DHCPv6 拿地址 + PD；设备在 phy0-sta0 上有公网 v6 即可。
+#    wifiwan6 走 DHCPv6 拿地址 + PD；设备在无线 STA 上有公网 v6 即可。
 #    实测：IA_NA 2409:8a60:2420:83a0::6e7/128，PD 2409:8a60:2420:83ac::/62
 #    （PD 只是顺带拿到，不用它给 LAN 分前缀）。
+#    注意 device 必须写成 @wifiwan（别名），不能写死 phy0-sta0：
+#    · vif 名是 netifd/无线子系统生成的，写死等于假设它永远是这个名字；
+#    · 静态写一个不存在的设备名，netifd 会先占位成一个普通设备，
+#      和无线子系统随后创建的同一个 vif 撞名，wifiwan 反而拿不到设备。
+#    上游 wan6 用 option device '@wan'，这里同理。
 uci -q delete network.lan.ip6assign
 uci -q delete network.lan.ip6hint
 
 uci -q delete network.wifiwan6
 uci set network.wifiwan6=interface
 uci set network.wifiwan6.proto='dhcpv6'
-uci set network.wifiwan6.device='phy0-sta0'
+uci set network.wifiwan6.device='@wifiwan'
 uci set network.wifiwan6.reqaddress='try'
 uci set network.wifiwan6.reqprefix='disabled'
 uci set network.wifiwan6.metric='5'

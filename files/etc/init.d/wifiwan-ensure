@@ -1,0 +1,71 @@
+#!/bin/sh /etc/rc.common
+# wifiwan-ensure —— 等 WCNSS phy 就绪后再把 STA 侧 WAN 拉起来
+#
+# 背景：msm8916 上 modem(MSS)/wcnss/wcn36xx 全是模块，phy0 要 20s 左右才出现，
+# 而 netifd 在 S20 就对 wifiwan 做 ifup，那次拿不到 phy0-sta0，只会记一条
+# NO_DEVICE 并且不再重试 —— 表现就是"无线关联上了，WAN 没有 IPv4"。
+# 本脚本在 boot 后观察一段时间，缺什么补什么，起来就立刻退出。
+#
+# START=95：排在 network(20)/wpad(19) 之后，不再抢跑。
+
+START=95
+
+LOG_TAG=wifiwan-ensure
+IFACE=wifiwan
+PHY_WAIT=40          # 等 phy0 的上限（秒）
+GRACE=12             # 先让 netifd 自己尝试，别抢跑（秒）
+TRIES=6              # 补 ifup 的次数
+RETRY_GAP=10         # 每次间隔（秒）
+
+log() { logger -t "$LOG_TAG" "$*"; }
+
+iface_up()    { ifstatus "$IFACE" 2>/dev/null | grep -q '"up": true'; }
+have_ipv4()   { ifstatus "$IFACE" 2>/dev/null | grep -q '"address": *"'; }
+sta_ifname()  { iw dev 2>/dev/null | awk '$1=="Interface"{n=$2} $1=="type"&&$2=="managed"{print n; exit}'; }
+
+wait_phy() {
+	i=0
+	while [ "$i" -lt "$PHY_WAIT" ]; do
+		[ -e /sys/class/ieee80211/phy0 ] && { log "phy0 present after ${i}s"; return 0; }
+		i=$((i + 1))
+		sleep 1
+	done
+	log "phy0 missing after ${PHY_WAIT}s"
+	return 1
+}
+
+ensure() {
+	wait_phy || { log "ask wireless retry (no phy)"; ubus call network.wireless retry >/dev/null 2>&1; }
+
+	# 宽限期：netifd 自己的 ifup 通常在这段时间内完成，正常启动不打扰它
+	sleep "$GRACE"
+
+	n=0
+	while [ "$n" -lt "$TRIES" ]; do
+		n=$((n + 1))
+
+		if iface_up && have_ipv4; then
+			log "ok: $IFACE up, $(ifstatus "$IFACE" | sed -n 's/.*"address": "\([0-9.]*\)".*/\1/p' | head -n1)"
+			return 0
+		fi
+
+		# vif 都没建出来时，先让 wifi 侧重试建接口
+		if [ -z "$(sta_ifname)" ]; then
+			log "attempt $n: no sta vif, wireless retry"
+			ubus call network.wireless retry >/dev/null 2>&1
+			sleep 3
+		fi
+
+		log "attempt $n: ifup $IFACE"
+		ubus call network.interface."$IFACE" up >/dev/null 2>&1 || ifup "$IFACE" >/dev/null 2>&1
+		sleep "$RETRY_GAP"
+	done
+
+	log "FAILED: $IFACE still not up"
+	ifstatus "$IFACE" 2>/dev/null | head -n 12 | while read -r l; do log "  $l"; done
+	return 1
+}
+
+boot() { ( ensure ) >/dev/null 2>&1 & }
+start() { ( ensure ) >/dev/null 2>&1 & }
+stop() { :; }
