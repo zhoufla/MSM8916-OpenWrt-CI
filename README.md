@@ -45,8 +45,11 @@ openstick 移植生态。
    | `ROOT_PASSWORD` | 设备 root 密码（构建时生成哈希，仓库不落明文/哈希） |
    | `LAN_IP` | LAN 地址，默认 `192.168.1.1` |
 
-2. **Actions → Build msm8916 → Run workflow**（选择机型，勾选 release 可同时发版）；
-   也可直接打 `v*` tag 触发；每周六自动跟一次上游。
+2. **Actions → Build msm8916 → Run workflow**（默认 `both`：两个机型 matrix 并行编译，
+   也可单独选择某个机型；勾选 release 可同时发版）；也可直接打 `v*` tag 触发；
+   每周六自动跟一次上游（两个机型一起编译）。
+   Release 为独立 job 汇总：两机型产物合并发一次版，校验和按机型命名为
+   `sha256sums-<model>.txt`。
 
 产物：`boot.img`（fastboot 刷 boot 分区）+ `system.img`（rootfs）+ `sysupgrade.bin`。
 注意分区表需含 `rootfs_data`（f2fs overlay）——从原厂分区迁移的方法见 jz02v10 相关文档。

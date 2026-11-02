@@ -4,10 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: '目标机型'
+        description: '目标机型（both = 两个机型并行编译）'
         type: choice
-        default: jz02v10
+        default: both
         options:
+          - both
           - jz02v10
           - sp970v11
       release:
@@ -27,6 +28,12 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [jz02v10, sp970v11]
+    # 手动触发按所选机型过滤；定时 / tag 触发时 inputs.model 为空，两个机型都编译
+    if: ${{ inputs.model == '' || inputs.model == 'both' || inputs.model == matrix.model }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +47,7 @@ jobs:
 
       - name: 构建固件
         env:
-          MODEL: ${{ inputs.model || 'jz02v10' }}
+          MODEL: ${{ matrix.model }}
           WIFI_SSID: ${{ secrets.WIFI_SSID }}
           WIFI_PSK: ${{ secrets.WIFI_PSK }}
           ROOT_PASSWORD: ${{ secrets.ROOT_PASSWORD }}
@@ -68,7 +75,7 @@ jobs:
       - name: 上传固件（artifact，保留 14 天）
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.model || 'jz02v10' }}-firmware
+          name: ${{ matrix.model }}-firmware
           path: |
             workspace/openwrt/bin/targets/msm89xx/msm8916/*.img
             workspace/openwrt/bin/targets/msm89xx/msm8916/*.bin
@@ -77,17 +84,37 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  release:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 汇总各机型产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 整理产物（合并两机型，sha256sums 按机型改名避免重名）
+        run: |
+          mkdir -p rel
+          find artifacts -type f \( -name '*.img' -o -name '*sysupgrade.bin' \) -exec cp {} rel/ \;
+          for d in artifacts/*/; do
+            m=$(basename "$d" -firmware)
+            [ -f "$d/sha256sums" ] && cp "$d/sha256sums" "rel/sha256sums-${m}.txt"
+          done
+          ls -lh rel/
+
       - name: 创建 Release（tag / 手动勾选时）
-        if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release }}
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            workspace/openwrt/bin/targets/msm89xx/msm8916/*.img
-            workspace/openwrt/bin/targets/msm89xx/msm8916/*sysupgrade.bin
-            workspace/openwrt/bin/targets/msm89xx/msm8916/sha256sums
+            rel/*.img
+            rel/*sysupgrade.bin
+            rel/sha256sums-*.txt
           body: |
-            ${{ inputs.model || 'jz02v10' }} (Zhihe jz02-v10 / GeXing SP970-V11, MSM8916) 自动构建
+            jz02v10 (Zhihe jz02-v10) + sp970v11 (GeXing SP970-V11, MSM8916) 自动构建
             - ImmortalWrt 89f1ef18c8 / msm89xx target
             - 基带：项目内置原厂固件（firmware/<model>/，来源 qcom-firmware）
             - 含 SMSRelay 短信网关、LTE 保活、LuCI 嵌入
+            - sha256sums-<model>.txt 为对应机型产物的校验和
           generate_release_notes: true
