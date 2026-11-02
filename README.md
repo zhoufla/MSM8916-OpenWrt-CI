@@ -6,7 +6,9 @@ openstick 移植生态。
 
 特性（相对上游 openstick 镜像的定制；jz02v10 经真机验证，sp970v11 见「机型」表）：
 
-- **精简**：剔除 docker/istore/simadmin 等无关包（423 → 357 CONFIG），system.img 约 43MB
+- **精简**：剔除 docker/istore/simadmin 等无关包；短信网关定位下再裁 USB 存储/网卡
+  变体、iptables 兼容栈、sqlite3/curl/xz 等无关工具库（diffconfig 显式选包 144 → 64，
+  展开数以实际构建为准）
 - **基带内置**：jz02v10 / sp970v11 原厂基带（MBA+MPSS，24 文件/机型）**从真机提取**
   后随仓库分发，构建期解压到 `/lib/firmware`；本地缺失的机型自动回退远程 openstick
   feed（见「基带固件」）
