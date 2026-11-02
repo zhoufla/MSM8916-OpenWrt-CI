@@ -18,6 +18,10 @@ openstick 移植生态。
   并在断网时 `ifdown/ifup modem` 自愈（netifd 版）
 - **USB 自愈**：Windows 对 RNDIS 选择性挂起导致数据面卡死时自动重绑 UDC
 - **LED**：只保留电源灯；SIM 卡槽 GPIO 不受影响
+- **SIM 卡槽自愈（sp970v11）**：SP970 的 `sim:sel` 是实体卡/eSIM 切换线而非 LED。
+  开机被 USB 触发器带跑时会停在 eSIM 一侧，叠加厂商 `activate_sim` 被注释，
+  表现为 `sim-missing` 且 LTE 起不来。`simfix`（S99）按板型门控介入，
+  jz02v10 一根 GPIO 都不碰（见「SIM 卡槽」）
 - **CPU**：schedutil + 默认 800MHz 上限，LuCI 页可调
 - **IPv6**：WAN 侧 DHCPv6（DDNS 用），LAN 不分发
 - **无线自动连接**：`wifiwan-ensure`（S95）兜底 STA 侧 WAN——msm8916 的 phy0 要 20s
@@ -31,7 +35,7 @@ openstick 移植生态。
 | MODEL | 设备 | 上游设备定义 | 设备树 | 真机验证 |
 |---|---|---|---|---|
 | `jz02v10` | Zhihe jz02-v10 4G Modem Stick | `openstick-jz02v10` | `msm8916-thwc-jz02v10` | 是 |
-| `sp970v11` | GeXing SP970-V11 4G Modem Stick | `openstick-sp970v11` | `msm8916-gexing-sp970` | 否 |
+| `sp970v11` | GeXing SP970-V11 4G Modem Stick | `openstick-sp970v11` | `msm8916-gexing-sp970` | 是（2026-11-02） |
 
 - 机型经 `MODEL` 环境变量 / workflow 输入选择，配置在 `configs/<model>.diffconfig`；
   build.sh 内有 MODEL → 设备树 的映射表，新机型在这里加一行。
@@ -87,6 +91,7 @@ files/                     # 根文件系统覆盖层（服务、LuCI、uci-defa
 firmware/                  # 项目内置基带（firmware/<model>/*.xz）
 jz02/wireless.tpl          # 无线配置模板（占位符）
 scripts/gen-wireless.sh    # 模板渲染（CI 与本地共用）
+scripts/test-simfix.sh     # simfix 离线验证（板型门控，无需真机）
 scripts/pull-modemfw.sh    # 基带真机提取（ssh → firmware/，md5 校验）
 scripts/fat_extract.py     # 原厂 modem 分区 FAT 镜像抽取工具
 scripts/sync-modemfw.sh    # 基带同步（qcom-firmware → firmware/）
@@ -146,6 +151,66 @@ FW_PASS=<设备root密码> ./scripts/pull-modemfw.sh <model> <设备地址>
    （S95，宽限 12s 后最多补 6 次）兜底；排查时看 `logread -e wifiwan-ensure`。
    另：`wifiwan6` 的 `device` 必须写 `@wifiwan`，不能写死 `phy0-sta0`（理由见
    `99-jz02-local` 注释）
+
+## SIM 卡槽（sp970v11）
+
+SP970 上 `/sys/class/leds/sim:sel` 名字像 LED，实际是**实体卡 / eSIM 切换线**：
+
+| `sim:sel` 电平 | 实际卡 | 真机实测标识 |
+|---|---|---|
+| `0` | 实体卡槽（物理 SIM） | IMSI `46002…`，CMCC |
+| `1` | 板载 eSIM | ICCID `898611…`，中国电信 |
+
+刷机后出现 `sim-missing`、`mmcli -m 0` 长期 `failed`、netifd 每 10s 刷
+"SIM missing"，是三层原因叠加：
+
+1. 该线开机时被绑到 `usb-gadget` 触发器，电平随 USB 状态跑，经常停在 eSIM 一侧；
+2. 厂商 `/usr/bin/qmi-modem-410-init` 里 `activate_sim` 的调用被注释掉，
+   `repower_sim()` 首行直接 `return 0` —— 卡槽选对了 USIM 也停在 `detected`，
+   进不到 `ready`，ModemManager 于是判 `failed / sim-missing`；
+3. MPSS 开机后连续 watchdog 崩溃 3~5 次（开机 2~3 分钟才稳定），期间 `/dev/wwan*` 消失。
+
+`files/etc/init.d/simfix`（S99）按这个顺序自愈：等 QMI 端口连续稳定 20s → 停
+ModemManager（qmicli 与它抢端口会报 `endpoint hangup`）→ 解绑触发器并把 `sim:sel`
+钉到 `slot` → 必要时重新上电 → 激活 provisioning session → 启回 MM、`--enable`、`ifup modem`。
+
+配置 `/etc/config/simfix`（默认值即可用）：
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `1` | `0` 完全停用 |
+| `slot` | `0` | `0` 实体卡 / `1` eSIM / `-1` 不干预 |
+| `force` | `0` | `1` 允许非 `gexing,sp970` 的**单线**板子也执行 |
+| `max_wait` / `stable_need` | `360` / `20` | 等端口稳定的上限与所需连续秒数 |
+| `power_cycle` | `1` | 卡不在位时重新上电 |
+| `tries` | `3` | 激活重试次数 |
+
+### 对 jz02v10 的影响：无（双重门控）
+
+两个机型共用 `files/` 覆盖层，门控只能写在脚本里、不能靠构建期区分：
+
+| | jz02v10 | sp970v11 |
+|---|---|---|
+| DTS `leds` 节点 | `sim:sel`(tlmm 1, `default-state="on"`)、`sim:en`(20)、`sim:sel2`(22)、`sim:en2`(23) | 只有 `sim:sel`(tlmm 114, `"off"`) |
+| `compatible` | `thwc,jz02v10` | `gexing,sp970` |
+| simfix 行为 | **跳过**（日志 `is not gexing-sp970, skip`），不停 MM、不写任何 GPIO | 接管 |
+
+1. **compatible 门控**：`/proc/device-tree/compatible` 不含 `gexing,sp970` 直接 `return 0`；
+2. **四线拓扑硬门控**：`sim:en2` / `sim:sel2` 任一存在即拒绝，**即使 `force=1` 也不接管**
+   —— jz02 卡槽映射完全不同，`sim:sel` 默认还是 `on`，拉 0 会把在用卡切走。
+
+`files/etc/rc.d/S99simfix` 是随镜像下发的软链（保证首次开机就生效，不依赖
+uci-defaults 的时序）；jz02 上它同样会被启动，但脚本在 `start()` 里就返回，只留一行日志。
+sysupgrade 保留见 `files/etc/sysupgrade.conf`。
+
+### 本地验证（不需要真机）
+
+```sh
+./scripts/test-simfix.sh
+```
+
+用假的 sysfs / device-tree / qmicli / mmcli / uci 跑真实脚本，断言：sp970 会钉卡槽并完成激活、
+jz02 与 jz02+`force=1` 一根 GPIO 都不碰、`enabled=0` 完全不动。
 
 ## 相关仓库
 

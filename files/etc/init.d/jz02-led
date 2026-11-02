@@ -11,6 +11,8 @@
 # ⚠️ sim:sel / sim:en / sim:sel2 / sim:en2 表面是 LED，实际是 SIM 卡槽控制线
 #   （DTS: gpios = <&tlmm 1/20/22/23>，gpio_switch 服务就是拿这几个 pin 控卡槽）。
 #   动它们有切槽掉网的风险，本脚本**不碰**。
+#   sp970v11 只有 sim:sel 一根（tlmm 114），由 /etc/init.d/simfix 接管；
+#   该服务按 compatible + 四线拓扑双重门控，在 jz02v10 上直接 return，不会动这里。
 
 START=99
 STOP=10

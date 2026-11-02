@@ -1,0 +1,24 @@
+
+config simfix 'settings'
+	# 0 = 停用本服务
+	option enabled '1'
+
+	# 卡槽选择线 sim:sel 的电平：
+	#   0 = 实体卡槽（默认，SP970 实测 IMSI 46002 中国移动）
+	#   1 = 板载 eSIM（实测为中国电信 profile）
+	#  -1 = 不干预，只用硬件默认值
+	option slot '0'
+
+	# 1 = 跳过板型门控强制执行。仅调试用；jz02v10 是四线双卡槽拓扑，
+	#     在它上面开这个会把正在用的卡切走，切勿开启。
+	option force '0'
+
+	# 等 QMI 端口稳定：MPSS 开机后会 watchdog 崩 3~5 次，端口会反复消失
+	option stable_need '20'
+	option max_wait '360'
+
+	# 卡不在位（no-atr / voltage-mismatch）时是否重新上电
+	option power_cycle '1'
+
+	# 激活重试次数
+	option tries '3'

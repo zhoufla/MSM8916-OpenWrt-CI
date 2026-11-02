@@ -38,8 +38,12 @@ if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
     WIFI_DISABLED=0
     MODE_DESC="已配置"
 else
-    WIFI_SSID="@WIFI_SSID@"
-    WIFI_PSK="@WIFI_PSK@"
+    # 未配置：ssid/key 渲染成空串。
+    # 注意：这里不能填回 "@WIFI_SSID@" 这类占位符本身 —— sed 会把占位符替换成
+    # 同样的字符串，产物里就留下 @WIFI_SSID@，build.sh 第 8 步的残留检查
+    # （见 build.sh "wireless 渲染不完整"）会直接失败。
+    WIFI_SSID=""
+    WIFI_PSK=""
     WIFI_DISABLED=1
     MODE_DESC="未配置（设备靠 LTE/USB 管理）"
 fi

@@ -1,0 +1,243 @@
+#!/bin/sh /etc/rc.common
+# simfix - 实体 SIM 卡槽锁定 + UIM 激活（gexing-sp970 / SP970-V11）
+#
+# 背景（2026-11-02 真机实测）：
+#
+# 1) /sys/class/leds/sim:sel 在 SP970 上不是 LED，是**双卡切换线**：
+#       brightness=0  -> 实体卡槽（实测 IMSI 46002 CMCC）
+#       brightness=1  -> 板载 eSIM（实测 ICCID 898611... 中国电信）
+#    若停在 eSIM 一侧而 eSIM 无可用 profile，USIM 应用停在 "detected"
+#    进不到 "ready"，ModemManager 报 state=failed / sim-missing，
+#    之后 mmcli --enable 被拒（Wrong state: modem in failed state），
+#    netifd 每 10s 重试，日志持续刷 "SIM missing"。
+#
+# 2) 厂商 /usr/bin/qmi-modem-410-init 里 activate_sim 的调用被注释掉，
+#    repower_sim() 首行就 return 0：即便卡槽选对，USIM 也不会被激活。
+#
+# 3) MPSS 开机后会连续 watchdog 崩溃数次（实测 3~5 次，到开机 2~3 分钟才
+#    稳定），期间 /dev/wwan* 会消失 —— 所以必须等端口"连续稳定"再动手。
+#
+# 4) qmicli 与 ModemManager 抢同一组 QMI 端口，MM 在跑时 qmicli 报
+#    "CID allocation failed ... endpoint hangup"，因此流程里先停 MM。
+#
+# 流程：等端口稳定 -> 停 MM -> 钉住卡槽 -> 必要时重新上电 -> 激活
+#       provisioning session -> 启 MM -> enable + ifup modem
+#
+# 板型门控（关键）：本服务只对 compatible 含 "gexing,sp970" 的板子生效。
+#   jz02v10 / ufi 系列是**四线双卡槽**拓扑（sim:en / sim:sel2 / sim:en2，
+#   见 msm8916-thwc-jz02v10.dts），卡槽映射与 SP970 完全不同，且 jz02v10
+#   的 sim:sel 默认态是 on —— 强行拉 0 会把在用卡切走。因此这里用
+#   compatible + 四线存在性双重判断，jz02 上本服务直接 return 0，
+#   不碰任何 GPIO、不停 ModemManager。
+#
+# 配置 /etc/config/simfix：
+#   option enabled     '1'    0 = 完全停用
+#   option slot        '0'    0 = 实体卡槽, 1 = eSIM, -1 = 不干预卡槽
+#   option force       '0'    1 = 允许非 gexing,sp970 的**单线**板子也执行
+#                             （四线双卡槽拓扑即使 force=1 也不接管）
+#   option max_wait    '360'  等 QMI 端口稳定的上限（秒）
+#   option stable_need '20'   端口需连续存在的秒数
+#   option power_cycle '1'    卡不在位时是否重新上电
+#   option tries       '3'    激活重试次数
+#
+# 停用：/etc/init.d/simfix disable
+#
+# 可测性：SIMFIX_COMPAT / SIMFIX_LEDS / SIMFIX_QMI / SIMFIX_MM 可用环境变量
+#   覆盖，仅用于离线验证（见 README「本地验证」），正常启动不设置。
+
+START=99
+STOP=10
+
+CFG=simfix
+TAG=simfix
+PIDFILE=${SIMFIX_PIDFILE:-/var/run/simfix.pid}
+
+COMPAT=${SIMFIX_COMPAT:-/proc/device-tree/compatible}
+LEDS=${SIMFIX_LEDS:-/sys/class/leds}
+QMI=${SIMFIX_QMI:-/dev/wwan0qmi0}
+MM=${SIMFIX_MM:-/etc/init.d/modemmanager}
+
+MAX_WAIT=360
+STABLE_NEED=20
+POWER_CYCLE=1
+TRIES=3
+SLOT=0
+
+log() { logger -t "$TAG" "$*" 2>/dev/null || echo "$TAG: $*" >&2; }
+
+cfg() { uci -q get "$CFG.settings.$1" 2>/dev/null; }
+
+# ---------------------------------------------------------------- 板型判定
+board_compat() { tr '\0' '\n' < "$COMPAT" 2>/dev/null; }
+
+board_model() { head -1 /tmp/sysinfo/model 2>/dev/null; }
+
+# 只有 SP970-V11 的单选择线拓扑才归本服务管。
+# 四线拓扑（sim:en2 / sim:sel2 存在）= jz02v10 / ufi 双卡槽：
+# **即使 force=1 也不接管**，这是不可绕过的硬门控。
+board_supported() {
+	[ -e "$LEDS/sim:en2" ] && return 1
+	[ -e "$LEDS/sim:sel2" ] && return 1
+	[ "$FORCE" = "1" ] && return 0
+	board_compat | grep -qx 'gexing,sp970'
+}
+
+# ---------------------------------------------------------------- QMI 辅助
+wait_stable_qmi() {
+	local waited=0 stable=0
+	while [ "$waited" -lt "$MAX_WAIT" ]; do
+		if [ -c "$QMI" ]; then
+			sleep 3
+			waited=$((waited + 3))
+			if [ -c "$QMI" ]; then
+				stable=$((stable + 3))
+				if [ "$stable" -ge "$STABLE_NEED" ]; then
+					log "qmi port stable after ${waited}s"
+					return 0
+				fi
+				continue
+			fi
+			stable=0
+			continue
+		fi
+		stable=0
+		sleep 3
+		waited=$((waited + 3))
+	done
+	log "qmi port never stable within ${MAX_WAIT}s"
+	return 1
+}
+
+bind_slot() {
+	local slot="$1"
+	[ "$slot" -ge 0 ] 2>/dev/null || { log "slot pin disabled (slot=$slot)"; return 0; }
+	[ -e "$LEDS/sim:sel/brightness" ] || { log "no $LEDS/sim:sel, skip slot pin"; return 1; }
+	# 解绑触发器：被绑成 usb-gadget 之类时，亮度会随 USB 状态自动变化，
+	# 等于卡槽选择跟着 USB 插拔跑，必须收回手动控制。
+	echo none > "$LEDS/sim:sel/trigger" 2>/dev/null
+	echo "$slot" > "$LEDS/sim:sel/brightness" 2>/dev/null
+	log "sim:sel -> $slot ($([ "$slot" = "0" ] && echo physical || echo esim))"
+}
+
+card_status() { timeout 15 qmicli -d "$QMI" --uim-get-card-status 2>/dev/null; }
+
+is_ready() { card_status | grep -q "Application state: 'ready'"; }
+
+is_present() { card_status | grep -q "Card state: 'present'"; }
+
+power_cycle() {
+	log "power cycling sim slot"
+	timeout 10 qmicli -d "$QMI" --uim-sim-power-off=1 >/dev/null 2>&1
+	sleep 2
+	timeout 10 qmicli -d "$QMI" --uim-sim-power-on=1 >/dev/null 2>&1
+	sleep 5
+}
+
+activate() {
+	local aid
+	aid=$(card_status | awk '
+		/Application type:/ && /usim/ { f = 1 }
+		f && /Application ID:/ { getline; gsub(/[ \t\r]/, ""); print; exit }
+	')
+	[ -z "$aid" ] && { log "no usim AID found"; return 1; }
+	log "activating provisioning session, aid=$aid"
+	timeout 25 qmicli -d "$QMI" \
+		--uim-change-provisioning-session="slot=1,activate=yes,session-type=primary-gw-provisioning,aid=$aid" \
+		>/dev/null 2>&1
+}
+
+modemmanager_up() {
+	[ -x "$MM" ] || return 0
+	"$MM" start >/dev/null 2>&1
+	sleep 30
+	if mmcli -L 2>/dev/null | grep -q Modem; then
+		mmcli -m any --enable >/dev/null 2>&1
+		ifdown modem >/dev/null 2>&1
+		sleep 1
+		ifup modem >/dev/null 2>&1
+		log "modem enabled / interface kicked"
+	else
+		log "modem not visible after MM start"
+	fi
+}
+
+# ---------------------------------------------------------------- 主流程
+worker() {
+	local i=1
+
+	if ! wait_stable_qmi; then
+		# 端口始终不稳：至少把 MM 拉回来，别把网络彻底掐死
+		log "giving up on activation, restarting modemmanager only"
+		[ -x "$MM" ] && "$MM" start >/dev/null 2>&1
+		rm -f "$PIDFILE"
+		return 1
+	fi
+
+	[ -x "$MM" ] && "$MM" stop >/dev/null 2>&1
+	sleep 4
+
+	bind_slot "$SLOT"
+
+	while [ "$i" -le "$TRIES" ]; do
+		if is_ready; then
+			log "sim already ready (attempt $i)"
+			break
+		fi
+		if [ "$POWER_CYCLE" = "1" ] && ! is_present; then
+			power_cycle
+		fi
+		activate
+		sleep 3
+		if is_ready; then
+			log "sim activated ok (attempt $i)"
+			break
+		fi
+		log "sim not ready yet (attempt $i)"
+		i=$((i + 1))
+		sleep 10
+	done
+
+	modemmanager_up
+	rm -f "$PIDFILE"
+	return 0
+}
+
+start() {
+	local enabled
+
+	enabled=$(cfg enabled); [ -z "$enabled" ] && enabled=1
+	if [ "$enabled" = "0" ]; then
+		log "disabled by /etc/config/$CFG"
+		return 0
+	fi
+
+	command -v qmicli >/dev/null 2>&1 || { log "qmicli not installed, skip"; return 0; }
+
+	FORCE=$(cfg force); [ -z "$FORCE" ] && FORCE=0
+	if ! board_supported; then
+		log "board '$(board_model)' is not gexing-sp970, skip (no gpio touched)"
+		return 0
+	fi
+
+	SLOT=$(cfg slot); [ -z "$SLOT" ] && SLOT=0
+	MAX_WAIT=$(cfg max_wait); [ -z "$MAX_WAIT" ] && MAX_WAIT=360
+	STABLE_NEED=$(cfg stable_need); [ -z "$STABLE_NEED" ] && STABLE_NEED=20
+	POWER_CYCLE=$(cfg power_cycle); [ -z "$POWER_CYCLE" ] && POWER_CYCLE=1
+	TRIES=$(cfg tries); [ -z "$TRIES" ] && TRIES=3
+
+	if [ -e "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+		log "already running (pid $(cat "$PIDFILE")), skip"
+		return 0
+	fi
+
+	log "starting (slot=$SLOT max_wait=$MAX_WAIT stable=$STABLE_NEED tries=$TRIES)"
+	( worker ) >/dev/null 2>&1 &
+	echo $! > "$PIDFILE"
+}
+
+stop() {
+	local p
+	p=$(cat "$PIDFILE" 2>/dev/null)
+	[ -n "$p" ] && kill "$p" 2>/dev/null
+	rm -f "$PIDFILE"
+}
