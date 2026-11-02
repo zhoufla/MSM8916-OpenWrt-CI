@@ -26,6 +26,8 @@
 #   6. export PKG_SOURCE_VERSION 会污染所有未声明 PKG_SOURCE 的包/工具
 #      （download.mk 默认 "$(PKG_NAME)-$(PKG_VERSION).tar.zst"）
 #      -> smsrelay 版本改为 sed 直接写进包 Makefile
+#   7. smsrelay 克隆只在目录不存在时进行 -> 本地重复构建复用旧克隆，包版本落后上游
+#      （CI 干净 runner 不受影响）-> 每次 fetch + reset 到分支 HEAD
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -213,7 +215,18 @@ fi
 # ---------------------------------------------------------------- 9. smsrelay
 if [ "${SKIP_SMSRELAY:-0}" != "1" ]; then
     log "9/10 安装 smsrelay 软件包（$SMSRELAY_REPO@$SMSRELAY_REF）"
-    if [ ! -d smsrelay ]; then
+    # 坑 7：只在目录不存在时克隆 -> 本地重复构建永远复用旧克隆，包版本会落后上游
+    # （曾导致本地产物一直是 0.1.0-r1，而 CI 的干净 runner 正常）。改为每次跟随分支。
+    if [ -d smsrelay/.git ]; then
+        if git -C smsrelay fetch -q --depth 1 origin "$SMSRELAY_REF"; then
+            git -C smsrelay reset -q --hard FETCH_HEAD
+        else
+            log "   拉取 $SMSRELAY_REF 失败，重新克隆"
+            rm -rf smsrelay
+            git clone -q --depth 1 -b "$SMSRELAY_REF" "https://github.com/$SMSRELAY_REPO" smsrelay
+        fi
+    else
+        rm -rf smsrelay
         git clone -q --depth 1 -b "$SMSRELAY_REF" "https://github.com/$SMSRELAY_REPO" smsrelay
     fi
     # 标准包：包目录（Makefile + files 覆盖层）放进构建树，Go 源码由构建树
