@@ -23,6 +23,9 @@
 #   4. -j$(nproc) 编内核偶发竞态 -> 整体失败后单独重编 target/linux 再续
 #   5. tools/flock 在 runner 上出现过"下载 flock tarball"版本且 dl 拉取失败
 #      -> 统一强制为树内编译（vendored），不再依赖任何 tarball
+#   6. export PKG_SOURCE_VERSION 会污染所有未声明 PKG_SOURCE 的包/工具
+#      （download.mk 默认 "$(PKG_NAME)-$(PKG_VERSION).tar.zst"）
+#      -> smsrelay 版本改为 sed 直接写进包 Makefile
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -133,6 +136,12 @@ PKG_NAME := flock
 PKG_VERSION := 2.18
 PKG_RELEASE := 1
 
+# 坑 6 的双保险：显式清空源码变量。即使外部再出现 PKG_SOURCE_VERSION
+# 一类环境变量，download.mk 的 "?= 默认 tarball" 与 unpack 均不会触发，
+# flock 永远走下方 src/ 树内编译。
+PKG_SOURCE :=
+PKG_SOURCE_URL :=
+
 include $(INCLUDE_DIR)/host-build.mk
 
 HOSTCC := $(HOSTCC_NOCACHE)
@@ -209,9 +218,13 @@ if [ "${SKIP_SMSRELAY:-0}" != "1" ]; then
     fi
     # 标准包：包目录（Makefile + files 覆盖层）放进构建树，Go 源码由构建树
     # 自己从 GitHub 拉取并在构建树内编译（openwrt/Makefile，出 ipk）。
-    # PKG_SOURCE_VERSION 导出为当前克隆的 HEAD，保证构建的就是分支最新代码；
-    # 想固定版本，unset 它即可，包 Makefile 里有默认 pin 的 commit。
-    export PKG_SOURCE_VERSION="$(git -C smsrelay rev-parse HEAD)"
+    # 坑 6：绝不能 export PKG_SOURCE_VERSION —— make 会把它当全局变量，
+    # download.mk 见到它就给所有未声明 PKG_SOURCE 的包/工具默认
+    # "下载 $(PKG_NAME)-$(PKG_VERSION).tar.zst"（tools/flock 首当其冲）。
+    # 改为直接把分支 HEAD 写进包 Makefile：跟随分支最新且无副作用。
+    SMSRELAY_HEAD=$(git -C smsrelay rev-parse HEAD)
+    sed -i "s|^PKG_SOURCE_VERSION?=.*|PKG_SOURCE_VERSION:=$SMSRELAY_HEAD|" \
+        smsrelay/openwrt/Makefile
     rm -rf package/smsrelay
     cp -a smsrelay/openwrt package/smsrelay
 fi
