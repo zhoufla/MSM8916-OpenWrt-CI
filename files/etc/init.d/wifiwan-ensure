@@ -1,68 +1,86 @@
 #!/bin/sh /etc/rc.common
-# wifiwan-ensure —— 等 WCNSS phy 就绪后再把 STA 侧 WAN 拉起来
+# wifiwan-ensure —— 首启兜底：接口真没起来时补一次 ifup
 #
-# 背景：msm8916 上 modem(MSS)/wcnss/wcn36xx 全是模块，phy0 要 20s 左右才出现，
-# 而 netifd 在 S20 就对 wifiwan 做 ifup，那次拿不到 phy0-sta0，只会记一条
-# NO_DEVICE 并且不再重试 —— 表现就是"无线关联上了，WAN 没有 IPv4"。
-# 本脚本在 boot 后观察一段时间，缺什么补什么，起来就立刻退出。
+# 背景：msm8916 的 modem(MSS)/wcnss/wcn36xx 全是模块，wcnss 要 10s 才注册 phy0。
+# netifd 在 S20 若拿不到 phy0-sta0，wifiwan 的首次 ifup 会记 NO_DEVICE 且不再重试，
+# 表现为"无线已关联、WAN 没有 IPv4"。wifi-preload(S19) 已把 phy0 等到位，
+# 正常情况下这里什么都不用做。
 #
-# START=95：排在 network(20)/wpad(19) 之后，不再抢跑。
+# 为什么只补一次：对无线接口 ifup 会触发 wifi-scripts 重新 "Preparing interface"，
+# 拆掉已关联的 vif 再重建（Remove interface phy0-sta0 + deauth）。反复 ifup
+# 等于自己打断自己，所以这里只做单次兜底，不循环。
 
 START=95
+STOP=10
 
 LOG_TAG=wifiwan-ensure
 IFACE=wifiwan
-PHY_WAIT=40          # 等 phy0 的上限（秒）
-GRACE=12             # 先让 netifd 自己尝试，别抢跑（秒）
-TRIES=6              # 补 ifup 的次数
-RETRY_GAP=10         # 每次间隔（秒）
+IFACE6=wifiwan6
+LINK_WAIT=60         # 等 STA 关联的上限（秒）
+SETTLE=12            # 关联成功后再给 netifd 收尾的时间（秒）
+UP_WAIT=20           # ifup 后等地址的时间（秒）
 
 log() { logger -t "$LOG_TAG" "$*"; }
 
-iface_up()    { ifstatus "$IFACE" 2>/dev/null | grep -q '"up": true'; }
-have_ipv4()   { ifstatus "$IFACE" 2>/dev/null | grep -q '"address": *"'; }
-sta_ifname()  { iw dev 2>/dev/null | awk '$1=="Interface"{n=$2} $1=="type"&&$2=="managed"{print n; exit}'; }
+iface_up() { ifstatus "$IFACE" 2>/dev/null | grep -q '"up": *true'; }
+have_v4()  { ifstatus "$IFACE" 2>/dev/null | grep -q '"address": *"[0-9]'; }
+sta_vif()  { iw dev 2>/dev/null | awk '$1=="Interface"{n=$2} $1=="type"&&$2=="managed"{print n; exit}'; }
+linked()   { [ -n "$1" ] && iw dev "$1" link 2>/dev/null | grep -q "^Connected"; }
 
-wait_phy() {
+wait_link() {
 	i=0
-	while [ "$i" -lt "$PHY_WAIT" ]; do
-		[ -e /sys/class/ieee80211/phy0 ] && { log "phy0 present after ${i}s"; return 0; }
+	while [ "$i" -lt "$LINK_WAIT" ]; do
+		if linked "$(sta_vif)"; then
+			log "STA associated after ${i}s"
+			return 0
+		fi
 		i=$((i + 1))
 		sleep 1
 	done
-	log "phy0 missing after ${PHY_WAIT}s"
 	return 1
 }
 
 ensure() {
-	wait_phy || { log "ask wireless retry (no phy)"; ubus call network.wireless retry >/dev/null 2>&1; }
+	if iface_up && have_v4; then
+		log "ok: $IFACE already up"
+		return 0
+	fi
 
-	# 宽限期：netifd 自己的 ifup 通常在这段时间内完成，正常启动不打扰它
-	sleep "$GRACE"
+	# 关联完成前不 ifup，避免把 vif 拆掉重建
+	if ! wait_link; then
+		log "no associated STA after ${LINK_WAIT}s, skip (wifi-preload/驱动需排查)"
+		return 1
+	fi
 
-	n=0
-	while [ "$n" -lt "$TRIES" ]; do
-		n=$((n + 1))
-
-		if iface_up && have_ipv4; then
-			log "ok: $IFACE up, $(ifstatus "$IFACE" | sed -n 's/.*"address": "\([0-9.]*\)".*/\1/p' | head -n1)"
+	# 关联刚成功时 netifd 通常正在 setup，给它时间自己收尾；
+	# 这一小段静默能避免"抢跑 -> ifup -> 拆链重建"的多余动作
+	i=0
+	while [ "$i" -lt "$SETTLE" ]; do
+		if iface_up && have_v4; then
+			log "ok: $IFACE up by netifd, $(ifstatus "$IFACE" | sed -n 's/.*"address": "\([0-9.]*\)".*/\1/p' | head -n1)"
+			ifstatus "$IFACE6" 2>/dev/null | grep -q '"up": *true' || ifup "$IFACE6" >/dev/null 2>&1
 			return 0
 		fi
-
-		# vif 都没建出来时，先让 wifi 侧重试建接口
-		if [ -z "$(sta_ifname)" ]; then
-			log "attempt $n: no sta vif, wireless retry"
-			ubus call network.wireless retry >/dev/null 2>&1
-			sleep 3
-		fi
-
-		log "attempt $n: ifup $IFACE"
-		ubus call network.interface."$IFACE" up >/dev/null 2>&1 || ifup "$IFACE" >/dev/null 2>&1
-		sleep "$RETRY_GAP"
+		i=$((i + 1))
+		sleep 1
 	done
 
-	log "FAILED: $IFACE still not up"
-	ifstatus "$IFACE" 2>/dev/null | head -n 12 | while read -r l; do log "  $l"; done
+	log "ifup $IFACE (single shot)"
+	ifup "$IFACE" >/dev/null 2>&1
+
+	i=0
+	while [ "$i" -lt "$UP_WAIT" ]; do
+		if iface_up && have_v4; then
+			log "ok: $IFACE up, $(ifstatus "$IFACE" | sed -n 's/.*"address": "\([0-9.]*\)".*/\1/p' | head -n1)"
+			ifstatus "$IFACE6" 2>/dev/null | grep -q '"up": *true' || ifup "$IFACE6" >/dev/null 2>&1
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+
+	log "FAILED: $IFACE has no IPv4 after ${UP_WAIT}s"
+	ifstatus "$IFACE" 2>/dev/null | head -n 14 | while read -r l; do log "  $l"; done
 	return 1
 }
 

@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# wifi-preload —— 在 network 之前等 WCNSS phy0 就绪
+#
+# 背景：msm8916 的 modem(MSS)/wcnss/wcn36xx 全是模块，wcnss 固件要 10s 左右
+# 才在 cfg80211 注册 phy0（dmesg: "wcn36xx: mac address"），20s 才 ready。
+# netifd 在 S20 应用 /etc/config/wireless：那一刻若 /sys/class/ieee80211/phy0
+# 不存在，radio0 就建不出来，wifiwan 的 ifup 只能拿到 NO_DEVICE，
+# 而 netifd 不会在 phy 后到时重跑一遍 —— 结果就是"无线关联成功、WAN 没 IPv4"。
+#
+# 本脚本排在 S19（早于 S20network），只做一件事：等 phy0 出现再让启动继续。
+# 不做 ifup、不碰配置，避免触发 wifi-scripts 重建 vif。
+#
+# 若 35s 内 phy0 仍没出现（无固件/硬件异常），照常放行，不阻塞启动。
+
+START=19
+
+LOG_TAG=wifi-preload
+PHY_WAIT=35
+
+log() { logger -t "$LOG_TAG" "$*"; }
+
+boot() {
+	i=0
+	while [ "$i" -lt "$PHY_WAIT" ]; do
+		if [ -e /sys/class/ieee80211/phy0 ]; then
+			log "phy0 ready after ${i}s"
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	log "phy0 missing after ${PHY_WAIT}s, continue boot anyway"
+	return 0
+}
+
+start() { boot; }
+stop() { :; }

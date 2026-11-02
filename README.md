@@ -24,9 +24,10 @@ openstick 移植生态。
   jz02v10 一根 GPIO 都不碰（见「SIM 卡槽」）
 - **CPU**：schedutil + 默认 800MHz 上限，LuCI 页可调
 - **IPv6**：WAN 侧 DHCPv6（DDNS 用），LAN 不分发
-- **无线自动连接**：`wifiwan-ensure`（S95）兜底 STA 侧 WAN——msm8916 的 phy0 要 20s
-  左右才出现，netifd 在 S20 抢跑会留下 `NO_DEVICE` 且不重试（表现：无线已关联、
-  `wifiwan` 无 IPv4）；该服务等 phy 就绪后补 `ifup`，正常启动只在日志留一行 `ok`
+- **无线自动连接**：`wifi-preload`（S19）在 network 之前等 `phy0`，`wifiwan-ensure`（S95）
+  在接口真没起来时补一次 `ifup`。msm8916 的 modem/wcnss/wcn36xx 都是模块，`phy0` 要 10s
+  才注册，netifd 在 S20 抢跑会留下 `NO_DEVICE` 且不重试（表现：无线已关联、`wifiwan`
+  无 IPv4）；正常启动两个服务只在日志各留一行 `ok`
 - **凭据不进仓库**：无线 SSID/密码、root 密码均为构建期注入（环境变量 / GitHub Secrets）；
   未提供则生成未配置固件（设备靠 LTE/USB 管理）
 
@@ -147,8 +148,12 @@ FW_PASS=<设备root密码> ./scripts/pull-modemfw.sh <model> <设备地址>
 4. **内核并行竞态**：`-j$(nproc)` 偶发 `fixdep` 失败 → 整体失败后单线程重编内核续跑
 5. **STA 侧 WAN 启动竞态**：`phy0` 由 `qcom-q6v5-mss`/`qcom_wcnss_pil`/`wcn36xx` 这几个
    模块异步拉起，S20 时未必就绪，netifd 那次 `ifup` 会失败并留下 `NO_DEVICE`（不再重试），
-   表现为"无线关联成功、`wifiwan` 没有 IPv4"。由 `files/etc/init.d/wifiwan-ensure`
-   （S95，宽限 12s 后最多补 6 次）兜底；排查时看 `logread -e wifiwan-ensure`。
+   表现为"无线关联成功、`wifiwan` 没有 IPv4"。分两层处理：
+   `wifi-preload`（S19，早于 `S20network`）等 `phy0` 出现再放行启动；
+   `wifiwan-ensure`（S95）仅在接口仍未起来时补**一次** `ifup`，关联成功后先静默 12s
+   让 netifd 自己收尾。**不要改成循环 ifup**：对无线接口反复 `ifup` 会触发
+   wifi-scripts 重建 vif（`Remove interface phy0-sta0` + deauth），自己打断自己。
+   排查：`logread -e wifi-preload` / `logread -e wifiwan-ensure`。
    另：`wifiwan6` 的 `device` 必须写 `@wifiwan`，不能写死 `phy0-sta0`（理由见
    `99-jz02-local` 注释）
 

@@ -55,10 +55,15 @@ rm -f /etc/rc.d/S25docker /etc/rc.d/S99dockerd /etc/rc.d/S91cpu-perf 2>/dev/null
 rm -f /etc/hotplug.d/iface/99-wifi-led 2>/dev/null
 
 # 7) 启用本地服务
-#    wifiwan-ensure：msm8916 的 modem/wcnss/wcn36xx 都是模块，phy0 要 20s 左右才出现，
-#    而 netifd 在 S20 就给 wifiwan 做 ifup，抢在 phy 之前只会记一条 NO_DEVICE 且不重试，
-#    表现是"无线关联上了、WAN 没有 IPv4"。该服务在 S95 兜底补 ifup。
-for s in auto_apn usbfix jz02-led jz02-power smsrelay wifiwan-ensure; do
+#    无线 WAN 的两个配套服务（顺序很重要）：
+#    · wifi-preload（S19，早于 S20network）：等 /sys/class/ieee80211/phy0 出现。
+#      msm8916 的 modem/wcnss/wcn36xx 都是模块，wcnss 固件要 10s 才注册 phy0；
+#      netifd 在 S20 应用 wireless 配置时若 phy0 还没到，radio0 建不出来，
+#      wifiwan 的首次 ifup 只能拿到 NO_DEVICE，而 netifd 不会在 phy 后到时重跑。
+#    · wifiwan-ensure（S95）：接口真没起来时补一次 ifup。只补一次——对无线接口
+#      反复 ifup 会触发 wifi-scripts 重建 vif（Remove interface + deauth），
+#      越补越乱；关联成功后先静默 12s 让 netifd 自己收尾，正常启动完全不插手。
+for s in auto_apn usbfix jz02-led jz02-power smsrelay wifi-preload wifiwan-ensure; do
 	[ -x /etc/init.d/$s ] || continue
 	chmod +x /etc/init.d/$s
 	/etc/init.d/$s enable >/dev/null 2>&1
