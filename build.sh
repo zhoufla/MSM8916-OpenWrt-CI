@@ -1,14 +1,16 @@
 #!/bin/bash
-# MSM8916-OpenWrt-CI —— jz02v10 (Zhihe 4G Modem Stick) 云编译 / 本地构建两用脚本
+# MSM8916-OpenWrt-CI —— jz02v10 / sp970v11 (MSM8916 4G Modem Stick) 云编译 / 本地构建两用脚本
 #
 # 用法:
 #   ./build.sh                      # 完整构建，产物在 workspace/openwrt/bin/targets/
+#   MODEL=sp970v11 ./build.sh       # 指定机型（默认 jz02v10）
 #   JOBS=8 ./build.sh               # 限制并行
 #   WIFI_SSID=MyHome WIFI_PSK=xxx ./build.sh
 #   ROOT_PASSWORD=xxx ./build.sh    # 设备 root 密码（生成哈希烧进固件）
 #   LAN_IP=192.168.66.1 ./build.sh  # LAN 地址（默认 192.168.1.1，上游原值）
 #
 # 可配环境变量:
+#   MODEL            机型，需存在 configs/<model>.diffconfig（默认 jz02v10）
 #   IMMORTALWRT_REF  ImmortalWrt commit（默认与首次成功构建一致）
 #   ACTIONS_REPO     msm89xx target 所在仓库（默认 xuxin1955/Actions）
 #   SMSRELAY_REF     SMSRelay8916 分支（默认 openwrt）
@@ -28,14 +30,23 @@ ACTIONS_REPO=${ACTIONS_REPO:-xuxin1955/Actions}
 SMSRELAY_REF=${SMSRELAY_REF:-openwrt}
 SMSRELAY_REPO=${SMSRELAY_REPO:-zhoufla/SMSRelay8916}
 LAN_IP=${LAN_IP:-192.168.1.1}
+MODEL=${MODEL:-jz02v10}
 JOBS=${JOBS:-$(nproc)}
 REPO_DIR=$(pwd)
+
+# 机型校验与设备树映射（新增机型：加 configs/<model>.diffconfig + 这里一行）
+[ -f "$REPO_DIR/configs/$MODEL.diffconfig" ] || { echo "未知机型: $MODEL（缺 configs/$MODEL.diffconfig）"; exit 1; }
+case "$MODEL" in
+	jz02v10)  DTS=msm8916-thwc-jz02v10 ;;
+	sp970v11) DTS=msm8916-gexing-sp970 ;;
+	*)        DTS="" ;;
+esac
 
 log() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------- 0. 依赖检查
 MISSING=0
-for c in git gcc g++ make rsync unzip curl perl python3 bison flex gawk; do
+for c in git gcc g++ make rsync unzip curl perl python3 xz bison flex gawk; do
     command -v "$c" >/dev/null 2>&1 || { echo "缺少命令: $c"; MISSING=1; }
 done
 [ "$MISSING" = 1 ] && { echo "请先安装构建依赖（见 README）"; exit 1; }
@@ -43,7 +54,7 @@ done
 mkdir -p "$WORK"; cd "$WORK"
 
 # ---------------------------------------------------------------- 1. 源码
-log "1/9 克隆 ImmortalWrt @ ${IMMORTALWRT_REF:0:10}"
+log "1/10 克隆 ImmortalWrt @ ${IMMORTALWRT_REF:0:10}"
 if [ ! -d openwrt ]; then
     git init -q openwrt && cd openwrt
     git remote add origin https://github.com/immortalwrt/immortalwrt
@@ -52,7 +63,7 @@ if [ ! -d openwrt ]; then
     cd ..
 fi
 
-log "2/9 应用 msm89xx target（$ACTIONS_REPO）"
+log "2/10 应用 msm89xx target（$ACTIONS_REPO）"
 if [ ! -d actions ]; then
     git clone -q --depth 1 "https://github.com/$ACTIONS_REPO" actions
 fi
@@ -60,16 +71,16 @@ cp -rf actions/scripts/msm89xx/target/.   openwrt/target/
 cp -rf actions/scripts/msm89xx/package/.  openwrt/package/
 cp -rf actions/scripts/msm89xx/toolchain/. openwrt/toolchain/
 test -f openwrt/target/linux/msm89xx/Makefile
-test -f openwrt/target/linux/msm89xx/dts/msm8916-thwc-jz02v10.dts
+[ -z "$DTS" ] || test -f "openwrt/target/linux/msm89xx/dts/$DTS.dts"
 
 cd openwrt
 
-log "3/9 feeds（固定 commit）"
+log "3/10 feeds（固定 commit）"
 cp "$REPO_DIR/configs/feeds.conf" feeds.conf
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 
-log "4/9 已知坑修补"
+log "4/10 已知坑修补"
 # 坑 2：firewall4 fullcone 补丁仅适用于旧 pin
 FW4_SRC="$WORK/actions/scripts/msm89xx/package/network/config/firewall4/patches/001-firewall4-add-support-for-fullcone-nat.patch"
 FW4_VER=$(sed -n 's/^PKG_SOURCE_VERSION:=//p' package/network/config/firewall4/Makefile)
@@ -94,19 +105,37 @@ grep -q 'incompatible-pointer-types' package/libs/libnftnl/Makefile || \
 # image.mk 去掉 DTC 对 graph_child_address 的报错
 sed -i '/Wno-graph_child_address/d' include/image.mk
 
-log "5/9 LAN 地址 -> $LAN_IP"
+log "5/10 LAN 地址 -> $LAN_IP"
 sed -i "s/192\.168\.1\.1/$LAN_IP/g" package/base-files/files/bin/config_generate
 sed -i "s/ucidef_set_interface_lan 'eth0'/ucidef_set_interface_lan 'br-lan'/" \
     package/base-files/files/etc/board.d/99-default_network
 
 # ---------------------------------------------------------------- 6. 覆盖层
-log "6/9 files 覆盖层（厂商 files-8916 + 本仓库定制）"
+log "6/10 files 覆盖层（厂商 files-8916 + 本仓库定制）"
 rm -rf files
 cp -r "$WORK/actions/scripts/files-8916" files
 cp -r "$REPO_DIR/files" .
 
+# ---------------------------------------------------------------- 7. 基带固件
+# MSM8916 基带（MBA+MPSS）是高通闭源固件，来自设备原厂 modem 分区。
+# 项目内置 firmware/<model>/（xz）优先；本地没有对应机型时回退到
+# openstick feed 的远程固件包（lkiuyu/qcom-firmware），保持上游行为。
+log "7/10 基带固件（$MODEL）"
+if [ -f "$REPO_DIR/firmware/$MODEL/mba.mbn.xz" ] && [ -f "$REPO_DIR/firmware/$MODEL/modem.mdt.xz" ]; then
+	mkdir -p files/lib/firmware
+	for fw in "$REPO_DIR/firmware/$MODEL"/*.xz; do
+		xz -dc "$fw" > "files/lib/firmware/$(basename "${fw%.xz}")"
+	done
+	# 从 DEVICE_PACKAGES 摘掉远程 modem 固件包，避免重复分发
+	sed -i "s/ qcom-msm8916-modem-openstick-$MODEL-firmware//" \
+		target/linux/msm89xx/image/msm8916.mk
+	echo "   使用项目内置基带（$(ls "$REPO_DIR/firmware/$MODEL"/*.xz | wc -l) 个文件 -> files/lib/firmware/）"
+else
+	echo "   firmware/$MODEL 不存在，改用远程 openstick feed 基带"
+fi
+
 # 无线凭据：有 WIFI_SSID/WIFI_PSK 就渲染，否则生成未配置版（设备靠 LTE/USB）
-log "7/9 渲染无线配置"
+log "8/10 渲染无线配置"
 ENV_WIFI_SSID="${WIFI_SSID:-}" ENV_WIFI_PSK="${WIFI_PSK:-}" ENV_WIFI_ENC="${WIFI_ENC:-}" \
     OUT="$PWD/files/etc/config/wireless" \
     bash "$REPO_DIR/scripts/gen-wireless.sh"
@@ -122,9 +151,9 @@ if [ -n "${ROOT_PASSWORD:-}" ]; then
     echo "   root password hash injected"
 fi
 
-# ---------------------------------------------------------------- 8. smsrelay
+# ---------------------------------------------------------------- 9. smsrelay
 if [ "${SKIP_SMSRELAY:-0}" != "1" ]; then
-    log "8/9 编译 SMSRelay（$SMSRELAY_REPO@$SMSRELAY_REF）"
+    log "9/10 编译 SMSRelay（$SMSRELAY_REPO@$SMSRELAY_REF）"
     if [ ! -d smsrelay ]; then
         git clone -q --depth 1 -b "$SMSRELAY_REF" "https://github.com/$SMSRELAY_REPO" smsrelay
     fi
@@ -136,9 +165,9 @@ if [ "${SKIP_SMSRELAY:-0}" != "1" ]; then
     ls -lh files/usr/bin/smsrelay
 fi
 
-# ---------------------------------------------------------------- 9. 编译
-log "9/9 配置与编译"
-cp "$REPO_DIR/configs/jz02v10.diffconfig" .config
+# ---------------------------------------------------------------- 10. 编译
+log "10/10 配置与编译（$MODEL）"
+cp "$REPO_DIR/configs/$MODEL.diffconfig" .config
 make defconfig
 
 # 坑 3：mkbootimg（deb 解包到用户目录，不依赖 root）
