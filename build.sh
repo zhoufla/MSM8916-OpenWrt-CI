@@ -21,6 +21,8 @@
 #   2. firewall4 fullcone 补丁只在上游 pin 为旧 commit 时适用 -> 按版本判断
 #   3. mkbootimg 生成 boot.img 必需，runner 默认没有 -> deb 解包到 ~/.local/bin
 #   4. -j$(nproc) 编内核偶发竞态 -> 整体失败后单独重编 target/linux 再续
+#   5. tools/flock 在 runner 上出现过"下载 flock tarball"版本且 dl 拉取失败
+#      -> 统一强制为树内编译（vendored），不再依赖任何 tarball
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -62,6 +64,10 @@ if [ ! -d openwrt ]; then
     git checkout -q FETCH_HEAD
     cd ..
 fi
+# 检出身份自检：实际 HEAD 必须等于 pin，若 runner 拿到别的树，在日志里立即暴露
+ACTUAL_REF=$(git -C openwrt rev-parse HEAD 2>/dev/null || echo unknown)
+[ "$ACTUAL_REF" = "$IMMORTALWRT_REF" ] || \
+    echo "::warning::ImmortalWrt 实际检出 $ACTUAL_REF ≠ pin $IMMORTALWRT_REF"
 
 log "2/10 应用 msm89xx target（$ACTIONS_REPO）"
 if [ ! -d actions ]; then
@@ -104,6 +110,50 @@ grep -q 'incompatible-pointer-types' package/libs/libnftnl/Makefile || \
     sed -i '/^TARGET_CFLAGS += \$(FPIC)/a TARGET_CFLAGS += -Wno-error=incompatible-pointer-types' package/libs/libnftnl/Makefile
 # image.mk 去掉 DTC 对 graph_child_address 的报错
 sed -i '/Wno-graph_child_address/d' include/image.mk
+
+# 坑 5：make download 依赖 tools/flock/compile（staging 缺 flock 二进制时先编它）。
+# 若树上的 tools/flock 是"下载 flock-2.18.tar.zst"的版本且 dl 拉取失败，
+# make download 第一步就会挂。这里无条件落盘 vendored Makefile + src/flock.c，
+# 让 flock 永远树内编译，彻底绕开 tarball 下载（幂等，pin 树本就是此内容）。
+if ! [ -f tools/flock/src/flock.c ]; then
+    curl -fsSL --retry 3 \
+        "https://raw.githubusercontent.com/immortalwrt/immortalwrt/$IMMORTALWRT_REF/tools/flock/src/flock.c" \
+        -o tools/flock/src/flock.c
+fi
+cat > tools/flock/Makefile <<'FLOCKMK'
+#
+# Copyright (C) 2006-2012 OpenWrt.org
+#
+# This is free software, licensed under the GNU General Public License v2.
+# See /LICENSE for more information.
+#
+include $(TOPDIR)/rules.mk
+
+PKG_NAME := flock
+PKG_VERSION := 2.18
+PKG_RELEASE := 1
+
+include $(INCLUDE_DIR)/host-build.mk
+
+HOSTCC := $(HOSTCC_NOCACHE)
+HOSTCXX := $(HOSTCXX_NOCACHE)
+
+define Host/Compile
+	mkdir -p $(HOST_BUILD_DIR)
+	$(HOSTCC) $(HOST_CFLAGS) -o $(HOST_BUILD_DIR)/flock src/flock.c
+endef
+
+define Host/Install
+	$(INSTALL_BIN) $(HOST_BUILD_DIR)/flock $(STAGING_DIR_HOST)/bin/
+endef
+
+define Host/Clean
+	rm -f $(STAGING_DIR_HOST)/bin/flock
+endef
+
+$(eval $(call HostBuild))
+FLOCKMK
+echo "   tools/flock -> 树内编译（vendored，不依赖 dl tarball）"
 
 log "5/10 LAN 地址 -> $LAN_IP"
 sed -i "s/192\.168\.1\.1/$LAN_IP/g" package/base-files/files/bin/config_generate
