@@ -153,16 +153,17 @@ fi
 
 # ---------------------------------------------------------------- 9. smsrelay
 if [ "${SKIP_SMSRELAY:-0}" != "1" ]; then
-    log "9/10 编译 SMSRelay（$SMSRELAY_REPO@$SMSRELAY_REF）"
+    log "9/10 安装 smsrelay 软件包（$SMSRELAY_REPO@$SMSRELAY_REF）"
     if [ ! -d smsrelay ]; then
         git clone -q --depth 1 -b "$SMSRELAY_REF" "https://github.com/$SMSRELAY_REPO" smsrelay
     fi
-    ( cd smsrelay
-      CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-      go build -trimpath \
-      -ldflags "-s -w -X main.Version=$(git describe --tags --always 2>/dev/null || echo openwrt)" \
-      -o "$WORK/openwrt/files/usr/bin/smsrelay" ./cmd/smsrelay )
-    ls -lh files/usr/bin/smsrelay
+    # 标准包：包目录（Makefile + files 覆盖层）放进构建树，Go 源码由构建树
+    # 自己从 GitHub 拉取并在构建树内编译（openwrt/Makefile，出 ipk）。
+    # PKG_SOURCE_VERSION 导出为当前克隆的 HEAD，保证构建的就是分支最新代码；
+    # 想固定版本，unset 它即可，包 Makefile 里有默认 pin 的 commit。
+    export PKG_SOURCE_VERSION="$(git -C smsrelay rev-parse HEAD)"
+    rm -rf package/smsrelay
+    cp -a smsrelay/openwrt package/smsrelay
 fi
 
 # ---------------------------------------------------------------- 10. 编译

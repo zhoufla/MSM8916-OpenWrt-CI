@@ -63,7 +63,8 @@ SKIP_SMSRELAY=1 ./build.sh       # 只编固件不编短信网关
 sudo apt-get install build-essential clang flex bison g++ gawk gettext git \
   libncurses-dev libssl-dev rsync unzip zlib1g-dev file wget curl ccache cmake \
   cpio python3 python3-pip swig bc time xxd libelf-dev xz-utils
-# Go 1.26+（仅编译 SMSRelay 需要；SKIP_SMSRELAY=1 可免）
+# Go 无需单独安装：smsrelay 是标准构建树包（package/smsrelay），
+# 由构建树拉取源码、用自带 golang 工具链编译并产出 ipk
 ```
 
 ## 目录
