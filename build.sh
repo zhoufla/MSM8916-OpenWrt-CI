@@ -8,9 +8,11 @@
 #   WIFI_SSID=MyHome WIFI_PSK=xxx ./build.sh
 #   ROOT_PASSWORD=xxx ./build.sh    # 设备 root 密码（生成哈希烧进固件）
 #   LAN_IP=192.168.66.1 ./build.sh  # LAN 地址（默认 192.168.1.1，上游原值）
+#   DEVICE_HOSTNAME=jz02-4g ./build.sh  # 设备主机名（默认 = 机型名，如 jz02v10）
 #
 # 可配环境变量:
 #   MODEL            机型，需存在 configs/<model>.diffconfig（默认 jz02v10）
+#   DEVICE_HOSTNAME  固件主机名（默认取 MODEL，即 jz02v10 / sp970v11）
 #   IMMORTALWRT_REF  ImmortalWrt commit（默认与首次成功构建一致）
 #   ACTIONS_REPO     msm89xx target 所在仓库（默认 xuxin1955/Actions）
 #   SMSRELAY_REF     SMSRelay8916 分支（默认 openwrt）
@@ -38,6 +40,8 @@ SMSRELAY_REF=${SMSRELAY_REF:-openwrt}
 SMSRELAY_REPO=${SMSRELAY_REPO:-zhoufla/SMSRelay8916}
 LAN_IP=${LAN_IP:-192.168.1.1}
 MODEL=${MODEL:-jz02v10}
+# 主机名默认跟随机型；刻意不用 HOSTNAME 作变量名——bash 自己会设成构建机名并导出。
+DEVICE_HOSTNAME=${DEVICE_HOSTNAME:-$MODEL}
 JOBS=${JOBS:-$(nproc)}
 REPO_DIR=$(pwd)
 
@@ -168,10 +172,20 @@ $(eval $(call HostBuild))
 FLOCKMK
 echo "   tools/flock -> 树内编译（vendored，不依赖 dl tarball）"
 
-log "5/10 LAN 地址 -> $LAN_IP"
+log "5/10 主机名 -> $DEVICE_HOSTNAME，LAN 地址 -> $LAN_IP"
 sed -i "s/192\.168\.1\.1/$LAN_IP/g" package/base-files/files/bin/config_generate
 sed -i "s/ucidef_set_interface_lan 'eth0'/ucidef_set_interface_lan 'br-lan'/" \
     package/base-files/files/etc/board.d/99-default_network
+
+# 主机名：首启由 /bin/config_generate 的 generate_static_system() 生成
+# /etc/config/system，上游那里写死 'ImmortalWrt'。按机型改名——匹配引号内任意值，
+# 不依赖上游具体写的哪个名字；board.d 不产出 system.hostname，所以不会被 board.json 覆盖。
+CG=package/base-files/files/bin/config_generate
+sed -i "s|\(set system\.@system\[-1\]\.hostname='\)[^']*'|\1$DEVICE_HOSTNAME'|" "$CG"
+if ! grep -q "hostname='$DEVICE_HOSTNAME'" "$CG"; then
+    echo "::error::主机名注入失败：上游 config_generate 结构可能变了（找不到 generate_static_system 的 hostname 行）"
+    exit 1
+fi
 
 # ---------------------------------------------------------------- 6. 覆盖层
 log "6/10 files 覆盖层（厂商 files-8916 + 本仓库定制）"
