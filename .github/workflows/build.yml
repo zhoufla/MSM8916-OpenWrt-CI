@@ -54,6 +54,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-24.04 镜像预装大量与固件构建无关的 SDK（Android/.NET/Haskell/CodeQL 等），
+      # 全量 OpenWrt 构建已贴着磁盘上限跑（run #10 sp970v11 在 host 包编译阶段
+      # "No space left on device"，runner 进程连诊断日志都写不了）。提前删掉可腾约 25GB。
+      - name: 释放磁盘空间
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/boost /usr/lib/jvm
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
       - name: 安装构建依赖
         run: |
           sudo apt-get -qq update
