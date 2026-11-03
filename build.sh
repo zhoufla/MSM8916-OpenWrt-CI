@@ -62,7 +62,9 @@ mkdir -p "$WORK"; cd "$WORK"
 
 # ---------------------------------------------------------------- 1. 源码
 log "1/10 克隆 ImmortalWrt @ ${IMMORTALWRT_REF:0:10}"
-if [ ! -d openwrt ]; then
+# 判据用 .git 而不是目录本身：CI 会先把 dl/ 和 .ccache/ 缓存还原进
+# workspace/openwrt/，目录已存在但没有源码树，按目录判断会跳过克隆直接开编。
+if [ ! -d openwrt/.git ]; then
     git init -q openwrt && cd openwrt
     git remote add origin https://github.com/immortalwrt/immortalwrt
     git fetch -q --depth 1 origin "$IMMORTALWRT_REF"

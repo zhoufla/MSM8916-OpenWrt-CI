@@ -1,0 +1,236 @@
+name: Cleanup old builds
+
+# 周期性清理编译结果，默认只保留最近 2 个版本：
+#   1. Release（连带 git tag）—— 受保护的 v* 正式版永不删除
+#   2. build 工作流的运行记录 —— 删运行会连带删掉它的 artifact
+#   3. 长期未被访问的 Actions 缓存 —— 缓存有仓库级 10G 配额，满了会互相驱逐
+#
+# 手动触发时四个输入都可覆盖；定时触发时输入为空，脚本内用默认值兜底
+# （布尔输入在定时触发时是 null，所以判断一律放在 bash 里用 ${X:-默认} 处理，
+#   不写成 `if: inputs.x == false` —— null 与 false 在表达式里会被当成 0 而相等）。
+
+on:
+  schedule:
+    # 每周日 UTC 00:00（北京周日 08:00）。构建 cron 是周六 18:00 UTC，
+    # 双机型并行约 112 分钟结束，这里留了 6 小时余量，不会误删刚出的产物。
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: '保留最近多少个版本（Release 与构建运行各自计数）'
+        type: number
+        default: 2
+      protect_releases:
+        description: 'v* 开头的正式版 Release 永不删除'
+        type: boolean
+        default: true
+      prune_caches:
+        description: '同时回收长期未使用的 Actions 缓存'
+        type: boolean
+        default: true
+      cache_days:
+        description: '缓存闲置多少天后回收（仅在开启缓存回收时生效）'
+        type: number
+        default: 30
+      dry_run:
+        description: '只打印将删除的对象，不真正删除'
+        type: boolean
+        default: false
+
+concurrency:
+  group: cleanup
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 删除 Release 及其 git tag
+  actions: write    # 删除运行记录 / artifact / 缓存
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  REPO: ${{ github.repository }}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: 参数整理与校验
+        env:
+          KEEP_INPUT: ${{ inputs.keep }}
+          PROTECT_INPUT: ${{ inputs.protect_releases }}
+          PRUNE_INPUT: ${{ inputs.prune_caches }}
+          CACHE_DAYS_INPUT: ${{ inputs.cache_days }}
+          DRY_INPUT: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          KEEP="${KEEP_INPUT:-2}"
+          case "$KEEP" in
+            ''|*[!0-9]*) echo "::error::keep 必须是正整数，收到 '$KEEP'"; exit 1 ;;
+          esac
+          [ "$KEEP" -ge 1 ] || { echo "::error::keep 至少为 1（否则会把最新版本也删掉）"; exit 1; }
+
+          CACHE_DAYS="${CACHE_DAYS_INPUT:-30}"
+          case "$CACHE_DAYS" in
+            ''|*[!0-9]*) echo "::error::cache_days 必须是正整数"; exit 1 ;;
+          esac
+
+          {
+            echo "KEEP=$KEEP"
+            echo "PROTECT=${PROTECT_INPUT:-true}"
+            echo "PRUNE=${PRUNE_INPUT:-true}"
+            echo "CACHE_DAYS=$CACHE_DAYS"
+            echo "DRY=${DRY_INPUT:-false}"
+          } >> "$GITHUB_ENV"
+
+          echo "保留 $KEEP 个版本 | 保护 v*: ${PROTECT_INPUT:-true} | 回收缓存: ${PRUNE_INPUT:-true} (闲置 ${CACHE_DAYS} 天) | dry-run: ${DRY_INPUT:-false}"
+
+      - name: 清理超出保留数的 Release
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          gh api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq '.[] | [.created_at, .tag_name, (.draft|tostring), (.prerelease|tostring)] | @tsv' \
+            | sort -r > "$tmp/rel.tsv" || true
+
+          total=$(wc -l < "$tmp/rel.tsv" | tr -d ' ')
+          [ "$total" -gt 0 ] || { echo "仓库里没有 Release，跳过"; exit 0; }
+          echo "共 $total 个 Release，保留最近 $KEEP 个"
+
+          idx=0; deleted=0; skipped=0; failed=0
+          while IFS=$'\t' read -r created tag draft pre; do
+            idx=$((idx + 1))
+            if [ "$idx" -le "$KEEP" ]; then
+              echo "保留 #$idx  $tag  ($created)"
+              continue
+            fi
+            # 正式版（v* 手工发版）默认不参与数量清理，否则发版历史会被冲掉
+            if [ "$PROTECT" = true ] && [[ "$tag" == v* ]]; then
+              echo "跳过（受保护）  $tag  ($created)"
+              skipped=$((skipped + 1))
+              continue
+            fi
+            if [ "$DRY" = true ]; then
+              echo "[dry-run] 将删除 Release + tag: $tag  ($created)"
+              continue
+            fi
+            # --cleanup-tag：连同 git tag 一起删，否则 tag 会一直堆在仓库里
+            if gh release delete "$tag" --repo "$REPO" --yes --cleanup-tag; then
+              echo "已删除  $tag  ($created)"
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::删除 Release $tag 失败"
+              failed=$((failed + 1))
+            fi
+          done < "$tmp/rel.tsv"
+
+          {
+            echo "### Release 清理"
+            echo ""
+            echo "| 项 | 数量 |"
+            echo "|---|---|"
+            echo "| 原有 | $total |"
+            echo "| 保留策略 | 最近 $KEEP 个 + 受保护 v* |"
+            echo "| 实际删除 | $deleted |"
+            echo "| 受保护跳过 | $skipped |"
+            echo "| 删除失败 | $failed |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$failed" -eq 0 ] || { echo "::error::$failed 个 Release 删除失败"; exit 1; }
+
+      - name: 清理超出保留数的构建运行（连带 artifact）
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          # 只清理 build 工作流的运行；本工作流与其它工作流的历史不受影响。
+          # 只取 status=completed，避免删掉正在跑的构建。
+          gh api --paginate "repos/$REPO/actions/workflows/build.yml/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.status=="completed")
+                  | [.created_at, (.id|tostring), .conclusion, .event, (.run_number|tostring)] | @tsv' \
+            | sort -r > "$tmp/runs.tsv" || true
+
+          total=$(wc -l < "$tmp/runs.tsv" | tr -d ' ')
+          [ "$total" -gt 0 ] || { echo "没有已完成的构建运行，跳过"; exit 0; }
+          echo "共 $total 次已完成的构建，保留最近 $KEEP 次"
+
+          idx=0; deleted=0; failed=0
+          while IFS=$'\t' read -r created id concl event num; do
+            idx=$((idx + 1))
+            if [ "$idx" -le "$KEEP" ]; then
+              echo "保留 #$num  run=$id  ($created $event $concl)"
+              continue
+            fi
+            if [ "$DRY" = true ]; then
+              echo "[dry-run] 将删除 run #$num id=$id  ($created $event $concl)"
+              continue
+            fi
+            # 删除运行记录会连带删除它名下的 artifact，这是清理"编译结果"的实质
+            if gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null; then
+              echo "已删除  run #$num id=$id  ($created $event $concl)"
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::删除 run $id 失败"
+              failed=$((failed + 1))
+            fi
+          done < "$tmp/runs.tsv"
+
+          {
+            echo ""
+            echo "### 构建运行清理（含 artifact）"
+            echo ""
+            echo "| 项 | 数量 |"
+            echo "|---|---|"
+            echo "| 原有 | $total |"
+            echo "| 保留最近 | $KEEP |"
+            echo "| 实际删除 | $deleted |"
+            echo "| 删除失败 | $failed |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$failed" -eq 0 ] || { echo "::error::$failed 个运行删除失败"; exit 1; }
+
+      - name: 回收长期未使用的缓存
+        # 缓存回收只是锦上添花（不清理也只是让缓存互相驱逐），
+        # 任何 gh/jq 版本差异都不该让整条清理链路变红。
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ "$PRUNE" != true ]; then
+            echo "未开启缓存回收，跳过"
+            exit 0
+          fi
+          command -v jq >/dev/null || { echo "::warning::没有 jq，跳过缓存回收"; exit 0; }
+
+          cutoff="$(date -u -d "-${CACHE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
+          echo "回收 lastAccessedAt < $cutoff 的缓存"
+          gh cache list --repo "$REPO" --limit 200 \
+            --json id,key,sizeInBytes,lastAccessedAt > /tmp/caches.json
+
+          jq -r --arg c "$cutoff" \
+            '.[] | select(.lastAccessedAt < $c) | "\(.id)\t\(.sizeInBytes)\t\(.key)"' \
+            /tmp/caches.json > /tmp/old.tsv
+
+          total=$(wc -l < /tmp/old.tsv | tr -d ' ')
+          echo "命中 $total 条闲置缓存"
+
+          deleted=0; failed=0; freed=0
+          while IFS=$'\t' read -r id size key; do
+            [ -n "${id:-}" ] || continue
+            if [ "$DRY" = true ]; then
+              echo "[dry-run] 将删除缓存 $key ($((size / 1024 / 1024)) MB)"
+              continue
+            fi
+            if gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null; then
+              echo "已删除缓存 $key ($((size / 1024 / 1024)) MB)"
+              deleted=$((deleted + 1)); freed=$((freed + size))
+            else
+              echo "::warning::删除缓存 $id 失败"
+              failed=$((failed + 1))
+            fi
+          done < /tmp/old.tsv
+
+          {
+            echo ""
+            echo "### 缓存回收"
+            echo ""
+            echo "- 闲置阈值：$CACHE_DAYS 天（cutoff $cutoff）"
+            echo "- 删除 $deleted 条，释放 $((freed / 1024 / 1024)) MB，失败 $failed 条"
+          } >> "$GITHUB_STEP_SUMMARY"

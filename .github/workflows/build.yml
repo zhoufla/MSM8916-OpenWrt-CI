@@ -20,10 +20,19 @@ on:
         type: string
         required: false
         default: ''
+      no_cache:
+        description: '禁用构建缓存（怀疑缓存导致怪问题时勾选，跑一次干净构建）'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 18 * * 6'   # 每周六 UTC 18:00（北京时间周日 02:00）跟一次上游
   push:
     tags: [ 'v*' ]
+
+# 上游 pin 只在这里写一次：build.sh 读同名环境变量（脚本内的默认值只服务于本地直跑），
+# 缓存 key 也引用它，升级上游只需改这一行。
+env:
+  IMMORTALWRT_REF: 89f1ef18c888f841633f19f92655ee4b7f7716a4
 
 concurrency:
   group: build-${{ github.ref }}
@@ -53,6 +62,42 @@ jobs:
             ccache cmake cpio python3 python3-pip python3-setuptools swig bc time \
             qemu-utils genisoimage vim xxd libelf-dev subversion xz-utils
 
+      # ---------------------------------------------------------------- 缓存
+      # 只缓存两类"纯输入侧"数据，都不参与正确性判断，还原旧了最多是缓存不命中：
+      #   dl/       make download 抓的源码 tarball，命中即省 1~2GB 下载（约 5~15 分钟）
+      #   .ccache   ccache 对象缓存（CONFIG_CCACHE=y 已在 configs/*.diffconfig 开启）
+      # 刻意不缓存 staging_dir / build_dir：它们与 .config 的 mtime、中间 stamp 强绑定，
+      # 跨版本还原可能让 make 跳过该重建的步骤、产出脏固件，风险不值得。
+      #
+      # 注：if 用 !inputs.no_cache 而不是 inputs.use_cache != false —— 定时 / tag 触发时
+      # inputs 上下文为空（null），null 与 false 在表达式里会被同时转成 0 而"相等"，
+      # 那种写法会让定时构建悄悄丢掉缓存。! 走的是真值判断，null 为 falsy，行为确定。
+      - name: 恢复源码下载缓存（dl）
+        if: ${{ !inputs.no_cache }}
+        uses: actions/cache@v4
+        with:
+          path: workspace/openwrt/dl
+          # 换上游 pin、改 feeds、改 build.sh 都会换 key；旧 key 由 cleanup 工作流回收。
+          # dl 是按文件名+哈希取用的，restore-keys 命中旧包不会污染构建。
+          key: dl-v1-${{ env.IMMORTALWRT_REF }}-${{ hashFiles('configs/feeds.conf', 'build.sh') }}
+          restore-keys: |
+            dl-v1-${{ env.IMMORTALWRT_REF }}-
+            dl-v1-
+
+      - name: 恢复 ccache
+        if: ${{ !inputs.no_cache }}
+        uses: actions/cache@v4
+        with:
+          path: workspace/openwrt/.ccache
+          # ccache 按内容哈希命中，还原到"配置有差异"的缓存也不会用错对象，
+          # 所以存在性不影响正确性，key 只决定回收粒度。按机型分开存，
+          # 避免两个并行 job 抢同一个 key（同一 key 只有一个能写入）。
+          key: ccache-v1-${{ env.IMMORTALWRT_REF }}-${{ hashFiles('configs/*.diffconfig', 'build.sh', 'files/**') }}-${{ matrix.model }}
+          # 两个机型共用绝大部分目标文件，首次跑另一机型时先借对方的缓存。
+          restore-keys: |
+            ccache-v1-${{ env.IMMORTALWRT_REF }}-${{ hashFiles('configs/*.diffconfig', 'build.sh', 'files/**') }}-
+            ccache-v1-${{ env.IMMORTALWRT_REF }}-
+
       - name: 构建固件
         env:
           MODEL: ${{ matrix.model }}
@@ -60,7 +105,24 @@ jobs:
           WIFI_PSK: ${{ secrets.WIFI_PSK }}
           ROOT_PASSWORD: ${{ secrets.ROOT_PASSWORD }}
           LAN_IP: ${{ secrets.LAN_IP }}
+          # ccache 上限：不设的话默认 5G，两个机型的缓存会撑爆仓库 10G 配额。
+          # 上游 rules.mk 只导出 NOCOMPRESS/BASEDIR/DIR，这两个变量不会被覆盖。
+          CCACHE_MAXSIZE: 2G
+          # 关键：工具链每轮都重建，cc 二进制的 mtime 必然变化，默认的
+          # mtime,size 校验会让整份缓存 100% 失效。pin 不变 => 编译器不变，
+          # 改用固定字符串校验，缓存才能跨 run 复用（代价是编译器换了也看不出来，
+          # 但换 pin 会同时换缓存 key，二者绑在一起）。
+          CCACHE_COMPILERCHECK: string:immortalwrt-${{ env.IMMORTALWRT_REF }}
         run: ./build.sh
+
+      - name: ccache 命中统计
+        if: always()
+        continue-on-error: true
+        run: |
+          B="$PWD/workspace/openwrt/staging_dir/host/bin/ccache"
+          [ -x "$B" ] || { echo "ccache 未构建（构建未走到工具链阶段），跳过"; exit 0; }
+          CCACHE_DIR="$PWD/workspace/openwrt/.ccache" "$B" -s -v | head -25
+          du -sh "$PWD/workspace/openwrt/.ccache" || true
 
       - name: 校验产物无隐私残留
         env:
