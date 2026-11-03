@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+# 开机时在后台拉起基带守护。
+# START=98：排在 S80 rmtfs、S60 qrtr 之后，S99 qmi-modem-410-init 之前。
+# 后台执行：不阻塞后续 S99 服务（smsrelay 等）。
+START=98
+STOP=10
+
+start() {
+    /usr/bin/modem-guard.sh >/dev/null 2>&1 &
+}
+
+stop() {
+    # 守护是一次性任务，无需常驻，这里不做处理
+    :
+}
