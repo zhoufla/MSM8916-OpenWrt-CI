@@ -15,6 +15,11 @@ on:
         description: '构建成功后创建 Release'
         type: boolean
         default: false
+      tag:
+        description: '手动创建 Release 用的 tag（留空则自动生成 build-<日期>-<短SHA>）'
+        type: string
+        required: false
+        default: ''
   schedule:
     - cron: '0 18 * * 6'   # 每周六 UTC 18:00（北京时间周日 02:00）跟一次上游
   push:
@@ -91,6 +96,10 @@ jobs:
     needs: build
     if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release }}
     runs-on: ubuntu-24.04
+    # 显式声明写权限：创建 Release / tag 需要 contents: write，
+    # 不依赖仓库默认的 GITHUB_TOKEN 权限设置。
+    permissions:
+      contents: write
     steps:
       - name: 汇总各机型产物
         uses: actions/download-artifact@v4
@@ -107,9 +116,32 @@ jobs:
           done
           ls -lh rel/
 
+      # action-gh-release 在非 tag 的 ref 上必须显式提供 tag_name，否则直接报
+      # "GitHub Releases requires a tag"（workflow_dispatch 的 ref 是 refs/heads/main）。
+      # tag 推送 -> 用该 tag；手动触发且填了 tag -> 用填的；否则自动生成 build-<日期>-<短SHA>。
+      - name: 决定 Release 标签
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="build-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          fi
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
       - name: 创建 Release（tag / 手动勾选时）
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          # tag 不存在时由 API 在指定提交上创建，避免打到已前移的分支 HEAD
+          target_commitish: ${{ github.sha }}
+          # 手动 / 定时构建的 build-* 标记为预发布，不抢占 v* 正式 tag 的 Latest
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           files: |
             rel/*.img
             rel/*sysupgrade.bin
