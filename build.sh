@@ -15,7 +15,7 @@
 #   DEVICE_HOSTNAME  固件主机名（默认取 MODEL，即 jz02v10 / sp970v11）
 #   IMMORTALWRT_REF  ImmortalWrt commit（默认与首次成功构建一致）
 #   ACTIONS_REPO     msm89xx target 所在仓库（默认 xuxin1955/Actions）
-#   SMSRELAY_REF     SMSRelay8916 分支（默认 openwrt；main 为 Debian 版）
+#   SMSRELAY_REF     SMSRelay8916 分支（默认 main，OpenWrt 版；debian 为 Debian 备份）
 #   SKIP_SMSRELAY=1  不编译短信网关（调试用）
 #
 # 已知坑（均已内置处理）:
@@ -36,7 +36,7 @@ cd "$(dirname "$0")"
 WORK=${WORK:-$PWD/workspace}
 IMMORTALWRT_REF=${IMMORTALWRT_REF:-89f1ef18c888f841633f19f92655ee4b7f7716a4}
 ACTIONS_REPO=${ACTIONS_REPO:-xuxin1955/Actions}
-SMSRELAY_REF=${SMSRELAY_REF:-openwrt}
+SMSRELAY_REF=${SMSRELAY_REF:-main}
 SMSRELAY_REPO=${SMSRELAY_REPO:-zhoufla/SMSRelay8916}
 LAN_IP=${LAN_IP:-192.168.1.1}
 MODEL=${MODEL:-jz02v10}
