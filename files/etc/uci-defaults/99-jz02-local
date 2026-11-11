@@ -63,7 +63,7 @@ rm -f /etc/hotplug.d/iface/99-wifi-led 2>/dev/null
 #    · wifiwan-ensure（S95）：接口真没起来时补一次 ifup。只补一次——对无线接口
 #      反复 ifup 会触发 wifi-scripts 重建 vif（Remove interface + deauth），
 #      越补越乱；关联成功后先静默 12s 让 netifd 自己收尾，正常启动完全不插手。
-for s in auto_apn usbfix jz02-led jz02-power smsrelay wifi-preload wifiwan-ensure; do
+for s in auto_apn usbfix wifi-preload wifiwan-ensure; do
 	[ -x /etc/init.d/$s ] || continue
 	chmod +x /etc/init.d/$s
 	/etc/init.d/$s enable >/dev/null 2>&1

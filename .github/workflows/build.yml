@@ -226,6 +226,6 @@ jobs:
             jz02v10 (Zhihe jz02-v10) + sp970v11 (GeXing SP970-V11, MSM8916) 自动构建
             - ImmortalWrt 89f1ef18c8 / msm89xx target
             - 基带：项目内置原厂固件（firmware/<model>/，来源 qcom-firmware）
-            - 含 SMSRelay 短信网关、LTE 保活、LuCI 嵌入
+            - 含 SMSRelay 短信网关、LTE 保活、原生 LuCI（设置 / 状态 / 短信记录 / 日志）
             - sha256sums-<model>.txt 为对应机型产物的校验和
           generate_release_notes: true

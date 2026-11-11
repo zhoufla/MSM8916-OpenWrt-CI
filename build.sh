@@ -273,7 +273,7 @@ fi
 
 # ---------------------------------------------------------------- 9. smsrelay
 if [ "${SKIP_SMSRELAY:-0}" != "1" ]; then
-    log "9/10 安装 smsrelay 软件包（$SMSRELAY_REPO@$SMSRELAY_REF）"
+    log "9/10 安装 smsrelay + luci-app-smsrelay（$SMSRELAY_REPO@$SMSRELAY_REF）"
     # 坑 7：只在目录不存在时克隆 -> 本地重复构建永远复用旧克隆，包版本会落后上游
     # （曾导致本地产物一直是 0.1.0-r1，而 CI 的干净 runner 正常）。改为每次跟随分支。
     if [ -d smsrelay/.git ]; then
@@ -304,6 +304,9 @@ fi
 # ---------------------------------------------------------------- 10. 编译
 log "10/10 配置与编译（$MODEL）"
 cp "$REPO_DIR/configs/$MODEL.diffconfig" .config
+if [ "${SKIP_SMSRELAY:-0}" = "1" ]; then
+    sed -i '/^CONFIG_PACKAGE_smsrelay=/d; /^CONFIG_PACKAGE_luci-app-smsrelay=/d' .config
+fi
 make defconfig
 
 # 坑 3：mkbootimg（deb 解包到用户目录，不依赖 root）

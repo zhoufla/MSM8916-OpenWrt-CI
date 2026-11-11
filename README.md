@@ -13,7 +13,8 @@ openstick 移植生态。
   后随仓库分发，构建期解压到 `/lib/firmware`；本地缺失的机型自动回退远程 openstick
   feed（见「基带固件」）
 - **短信网关**：内置 [SMSRelay](https://github.com/zhoufla/SMSRelay8916)（收发、验证码提取、
-  多通道转发），procd 双实例托管，LuCI「服务 → 短信网关」嵌入其自带 UI
+  多通道转发），procd 托管后台与保活；原生 LuCI 四页签：设置、状态、短信记录、日志，
+  不再嵌入独立网页或监听 8088。CPU/LED 设置从 `/system/jz02` 合并至应用设置页
 - **LTE 保活**：MPSS（2015）在 LTE 空闲态收不到寻呼会导致短信延迟，keepalive 实例周期保活
   并在断网时 `ifdown/ifup modem` 自愈（netifd 版）
 - **USB 自愈**：Windows 对 RNDIS 选择性挂起导致数据面卡死时自动重绑 UDC
@@ -22,7 +23,7 @@ openstick 移植生态。
   开机被 USB 触发器带跑时会停在 eSIM 一侧，叠加厂商 `activate_sim` 被注释，
   表现为 `sim-missing` 且 LTE 起不来。`simfix`（S99）按板型门控介入，
   jz02v10 一根 GPIO 都不碰（见「SIM 卡槽」）
-- **CPU**：schedutil + 默认 800MHz 上限，LuCI 页可调
+- **CPU**：schedutil + 默认 800MHz 上限，在短信网关设置页调整（脚本由 `luci-app-smsrelay` 提供）
 - **IPv6**：WAN 侧 DHCPv6（DDNS 用），LAN 不分发
 - **无线自动连接**：`wifi-preload`（S19）在 network 之前等 `phy0`，`wifiwan-ensure`（S95）
   在接口真没起来时补一次 `ifup`。msm8916 的 modem/wcnss/wcn36xx 都是模块，`phy0` 要 10s
@@ -80,6 +81,11 @@ sudo apt-get install build-essential clang flex bison g++ gawk gettext git \
 # Go 无需单独安装：smsrelay 是标准构建树包（package/smsrelay），
 # 由构建树拉取源码、用自带 golang 工具链编译并产出 ipk
 ```
+
+短信应用生成 `smsrelay` 与 `luci-app-smsrelay` 两个包，两机型均默认选中。
+应用包负责 JZ02 配置及性能/LED 服务，本仓库不再复制同名页面或脚本。
+构建脚本将 SMSRelay 的分支提交固定进包 Makefile；配套的应用改动须先发布到对应分支。
+短信库通过应用提供的 SQLite 一致性快照参与保留配置升级；首次从旧版升级前需先停服务备份短信库。
 
 ## 目录
 
