@@ -1,3 +1,7 @@
 workspace/
 files/etc/config/wireless
 files/usr/bin/smsrelay
+
+# 本地凭据：WIFI_SSID / WIFI_PSK 等，绝不可入库
+# （scripts/gen-wireless.sh 从这里读，CI 走 GitHub Secrets 环境变量）
+secrets/
