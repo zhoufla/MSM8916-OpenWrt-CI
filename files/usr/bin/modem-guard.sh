@@ -31,6 +31,16 @@ announce_failed() {
 crash_count() { dmesg | grep -ac "handling crash"; }
 port_count()  { ls /dev/wwan0* 2>/dev/null | wc -l; }
 
+# 端口齐全：qmi0（QMI 控制口）+ 至少一个 at 口。
+# 不要用固定数量——各机型不一样，写死会把正常开机判成失败：
+#   SP970: /dev/wwan0at0 + wwan0at1 + wwan0qmi0  (3 个)
+#   JZ02 : /dev/wwan0at1 + wwan0qmi0             (2 个，没有 at0)
+ports_ok() {
+    [ -c /dev/wwan0qmi0 ] || return 1
+    ls /dev/wwan0at* >/dev/null 2>&1 || return 1
+    return 0
+}
+
 # 0=健康  1=握手失败(stall)  2=窗口内无任何结论  3=崩过/端口不全
 check_once() {
     limit=$1
@@ -54,7 +64,7 @@ check_once() {
         sleep 1
     done
 
-    [ "$(port_count)" -ge 3 ] && return 0
+    ports_ok && return 0
     return 3
 }
 
