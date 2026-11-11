@@ -1,0 +1,26 @@
+#!/bin/sh /etc/rc.common
+# 基带开机兜底：基带 running 后端口迟迟不出现时主动重启 mss，
+# 把单次恢复从 modem 看门狗的 40s 压到约 20s。逻辑见 /usr/bin/modem-recover。
+#
+# 关掉：/etc/init.d/modem-recover disable
+# 调参：改下面 MODEM_RECOVER_ARGS
+# 观测不动作：MODEM_RECOVER_ARGS="-n 0"
+
+START=99
+STOP=10
+USE_PROCD=1
+
+# 阈值 20s：实测正常冷启动 mss up -> wwan0 间隔 1.2s，偶发慢启动 17s，
+# 12s 会误判并白白重启一次 mss；真 stalled（dog 40s）在 20s 时介入仍能省 20s。
+# -n 1：实测真 stalled 时重启 3 次全都无效（重启后照样停滞），多花 72s 无收益，
+#       最后还是靠 dog 40s 自愈；只试一次即可，失败就交给内核看门狗。
+MODEM_RECOVER_ARGS="-n 1 -w 20"
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/bin/modem-recover $MODEM_RECOVER_ARGS
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# 一次性任务，刻意不设 respawn：脚本自己会重试，失败就交给内核看门狗
+	procd_close_instance
+}
