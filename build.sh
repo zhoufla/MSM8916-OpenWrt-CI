@@ -40,6 +40,13 @@ SMSRELAY_REF=${SMSRELAY_REF:-openwrt}
 SMSRELAY_REPO=${SMSRELAY_REPO:-zhoufla/SMSRelay8916}
 LAN_IP=${LAN_IP:-192.168.1.1}
 MODEL=${MODEL:-jz02v10}
+# 内核版本：target 里 config-6.18 / patches-6.18 已就绪，切版本只需改这一处。
+# A（smd_dsm_memcpy 抢跑）根因在用户态 QMI 脚本，已由 files/ 下的 wait-modem 修复，
+# 与内核无关；但 B（基带 up 后端口迟迟不出现 -> 重启 mss 才恢复）是内核回归：
+# 6.18 实测 6/6 都 1.2~3.8s 出端口，7.3.1 实测 6/6 都要靠 modem-recover 重启一次
+# （其中 1/6 走到 dog.c 停滞、117s 才恢复）。故默认仍固定 6.18。
+# 见 docs/baseband-android-vs-mainline.md §11、§12。
+KERNEL_PATCHVER=${KERNEL_PATCHVER:-6.18}
 # 主机名默认跟随机型；刻意不用 HOSTNAME 作变量名——bash 自己会设成构建机名并导出。
 DEVICE_HOSTNAME=${DEVICE_HOSTNAME:-$MODEL}
 JOBS=${JOBS:-$(nproc)}
@@ -89,6 +96,35 @@ cp -rf actions/scripts/msm89xx/package/.  openwrt/package/
 cp -rf actions/scripts/msm89xx/toolchain/. openwrt/toolchain/
 test -f openwrt/target/linux/msm89xx/Makefile
 [ -z "$DTS" ] || test -f "openwrt/target/linux/msm89xx/dts/$DTS.dts"
+
+# 覆写 target 自带的 KERNEL_PATCHVER（上游默认 7.3）
+sed -i "s|^KERNEL_PATCHVER:=.*|KERNEL_PATCHVER:=$KERNEL_PATCHVER|" \
+    openwrt/target/linux/msm89xx/Makefile
+log "   内核版本: $KERNEL_PATCHVER"
+
+# 6.18 起 arm64 uapi 头文件已经用 __uint128_t，ImmortalWrt 的 0104 补丁套不上
+# （patch failed -> toolchain/kernel-headers 编译失败），此处跳过。
+# 切回 7.3 等低版本时必须恢复，否则该版本缺补丁（这里做反向恢复，双保险：
+# 第 2 步的 cp 通常会覆盖回来，但本地已有 .disabled 时 cp 不会删它）。
+KH_DIR=openwrt/toolchain/kernel-headers
+KH=$KH_DIR/patches/0104-uapi-128bit.patch
+KH_OFF=$KH_DIR/0104-uapi-128bit.patch.disabled
+case "$KERNEL_PATCHVER" in
+	6.18*)
+		if [ -f "$KH" ]; then
+			# 必须移出 patches/ 目录：构建时会把目录里所有文件都当补丁套
+			mv "$KH" "$KH_OFF"
+			log "   kernel-headers: 跳过 0104-uapi-128bit（6.18 已含 __uint128_t）"
+		fi
+		;;
+	*)
+		if [ -f "$KH_OFF" ] && [ ! -f "$KH" ]; then
+			mv "$KH_OFF" "$KH"
+			log "   kernel-headers: 恢复 0104-uapi-128bit（$KERNEL_PATCHVER 需要）"
+		fi
+		rm -f "$KH_OFF" 2>/dev/null
+		;;
+esac
 
 cd openwrt
 
