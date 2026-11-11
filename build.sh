@@ -102,6 +102,13 @@ sed -i "s|^KERNEL_PATCHVER:=.*|KERNEL_PATCHVER:=$KERNEL_PATCHVER|" \
     openwrt/target/linux/msm89xx/Makefile
 log "   内核版本: $KERNEL_PATCHVER"
 
+# 本地内核补丁：随版本接入 target，避免上游复制覆盖 TSENS 修复。
+if [ -d "$REPO_DIR/patches/$KERNEL_PATCHVER" ]; then
+    mkdir -p "openwrt/target/linux/msm89xx/patches-$KERNEL_PATCHVER"
+    cp -f "$REPO_DIR/patches/$KERNEL_PATCHVER/"*.patch \
+        "openwrt/target/linux/msm89xx/patches-$KERNEL_PATCHVER/"
+fi
+
 # 6.18 起 arm64 uapi 头文件已经用 __uint128_t，ImmortalWrt 的 0104 补丁套不上
 # （patch failed -> toolchain/kernel-headers 编译失败），此处跳过。
 # 切回 7.3 等低版本时必须恢复，否则该版本缺补丁（这里做反向恢复，双保险：
