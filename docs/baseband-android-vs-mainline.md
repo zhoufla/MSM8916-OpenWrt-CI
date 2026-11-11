@@ -419,8 +419,9 @@ smsrelay 正常运行——功能面未受影响。
 7.3.1 是 **6/6 都要靠主动重启 mss 才出端口**，还有 1/6 走到 `dog.c:1498` 停滞、117 s 才恢复。
 
 结论：**A = 用户态，B = 内核**，两者彻底分离。因此内核仍固定 6.18，
-`modem-recover` 保留为 6.18 上的兜底（在 6.18 上实测不触发，仅在回归内核上才会动作），
-等待阈值从 12 s 放宽到 20 s（12 s 会把"正常但慢"的 16.9 s 启动误判成停滞）。
+兜底脚本保留（在 6.18 上实测不触发，仅在回归内核上才会动作），
+等待阈值当时从 12 s 放宽到 20 s（12 s 会把"正常但慢"的 16.9 s 启动误判成停滞）。
+**注：该脚本后来被 `modem-guard` 取代并删除，见本节末尾"最终决定"。**
 
 ### 最终交付版本的复核（6.18.55 + 全部修复）
 
@@ -441,13 +442,32 @@ smsrelay 正常运行——功能面未受影响。
 | 问题 | 原状 | 现在 |
 |---|---|---|
 | **`wait-modem` 超时保护失效** | 调用方写 `/usr/bin/wait-modem; exec qmi-modem-410-init`，**分号**意味着一律继续，等不到 `wwan0` 也照发 QMI——正好绕过修复本意 | 改 `&&`；`qmi-modem-410-init` 用 `for i in 1 2 3` 重试（每次 60 s），三轮都超时则只记日志、**不发 QMI**。该脚本是一次性任务，**刻意不加 respawn**（否则会反复重生、反复发 QMI） |
-| **`modem-recover -n 3` 是纯消耗** | 真 stalled 时实测重启 3 次**全部无效**（重启后照样停滞），白花 72 s，最后还是靠 dog 40 s 自愈 | 改 `-n 1`：试一次，不成就交给内核看门狗 |
+| **`modem-recover -n 3` 是纯消耗** | 真 stalled 时实测重启 3 次**全部无效**（重启后照样停滞），白花 72 s，最后还是靠 dog 40 s 自愈 | 当时改成 `-n 1`；后来该脚本整个被 `modem-guard` 取代（见下） |
 
 另外 `build.sh` 的 0104 补丁分支补上了**反向恢复**（切回 7.3 等低版本时把
 `.disabled` 挪回 `patches/`），避免"切过 6.18 再切回来缺补丁"。
 
 改后重新出包、擦 overlay 重刷，6 次冷启动仍 **0/6 崩**（mss 每轮 1 次、gap 1.2 s、recover 0），
 数据面 `attached` + 默认路由 `via wwan0`，说明 QMI 初始化路径未被改坏。
+
+### 最终决定（2026-11-11 09:50）：删掉 `modem-recover`，统一用 `modem-guard` v4
+
+仓库里同时存在两套基带兜底，判据精度差得很远：
+
+| | `modem-guard.sh` v4（保留） | `modem-recover`（已删除） |
+|---|---|---|
+| 失败判据 | `failed to announce new service`（up 后 0.7 ms 出现，与失败 100% 相关） | 20 s 内 `wwan0` 不出现 |
+| 成功判据 | `at0/at1/qmi0` 三端口齐全 **+ 15 s 稳定窗口**内无新 crash | `wwan0` 出现即算成功 |
+| crash 残留通道 | 本次开机崩过就再做一次干净 stop/start（处理 `Channel already open: 0..7`） | 不处理 |
+| 失败收尾 | 最后一次**不再 stop**，modem 留在 running 交回内核恢复 | 同样不 stop，但已无更多动作 |
+
+`modem-recover` 的问题是"端口出现即成功"——而 A 签名正是"端口出现后 3~5 s 才崩"，
+所以它会把失败判成成功。已删除 `files/usr/bin/modem-recover` 与 `files/etc/init.d/modem-recover`。
+
+启用方式：把 `files/etc/init.d/modem-guard` 放进覆盖层即可——OpenWrt 会为
+`files/etc/init.d/*` 自动生成 `rc.d` 链接（`S99qmi-modem-410-init`、`S98qmi_auto_activate`
+都是这样来的，构建树里并没有对应的符号链接）。`START=98`，`start()` 后台执行，不阻塞后续 S99 服务。
+
 
 
 

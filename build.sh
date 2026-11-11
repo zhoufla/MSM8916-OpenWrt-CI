@@ -43,7 +43,7 @@ MODEL=${MODEL:-jz02v10}
 # 内核版本：target 里 config-6.18 / patches-6.18 已就绪，切版本只需改这一处。
 # A（smd_dsm_memcpy 抢跑）根因在用户态 QMI 脚本，已由 files/ 下的 wait-modem 修复，
 # 与内核无关；但 B（基带 up 后端口迟迟不出现 -> 重启 mss 才恢复）是内核回归：
-# 6.18 实测 6/6 都 1.2~3.8s 出端口，7.3.1 实测 6/6 都要靠 modem-recover 重启一次
+# 6.18 实测 6/6 都 1.2~3.8s 出端口，7.3.1 实测 6/6 都要靠主动重启 mss 才出端口
 # （其中 1/6 走到 dog.c 停滞、117s 才恢复）。故默认仍固定 6.18。
 # 见 docs/baseband-android-vs-mainline.md §11、§12。
 KERNEL_PATCHVER=${KERNEL_PATCHVER:-6.18}
