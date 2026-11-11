@@ -30,15 +30,17 @@ trap 'rm -rf "$TMP"' EXIT
 for model in "$@"; do
 	echo "==> $model（来源 qcom-firmware@$FW_COMMIT）"
 	curl -fL --retry 3 -o "$TMP/$model.bin" "$BASE/openstick-$model-modem.bin"
-	rm -rf "firmware/$model"
+	# 只清掉本脚本管理的 *.xz，保留 firmware/<model>/nv/（设备专属 EFS/NV 备份）。
+	rm -f "firmware/$model"/*.xz
 	python3 "$DIR/fat_extract.py" "$TMP/$model.bin" "firmware/$model"
 	(
 		cd "firmware/$model" || exit 1
 		for f in *; do
+			[ -f "$f" ] || continue   # 跳过 nv/ 等子目录，xz 不能压缩目录
 			xz -T0 -9 -f "$f"
 		done
 	)
-	echo "    $(ls "firmware/$model" | wc -l) 个文件 -> firmware/$model/"
+	echo "    $(ls "firmware/$model"/*.xz | wc -l) 个文件 -> firmware/$model/（nv/ 保留）"
 done
 
 echo "完成。构建时 build.sh 自动解压到 files/lib/firmware/。"

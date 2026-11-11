@@ -37,8 +37,9 @@ $SSH 'cd /lib/firmware && md5sum mba.mbn modem.mdt modem.b[0-9]*' > "$TMP/device
 ( cd "$TMP/raw" && md5sum -c "$TMP/device.md5" --quiet ) || {
 	echo "::error::传输校验失败"; exit 1; }
 
-# 校验通过才替换本地固件
-rm -rf "firmware/$MODEL"
+# 校验通过才替换本地基带。只删本脚本管理的 *.xz，不要 rm -rf 整个目录：
+# firmware/<model>/nv/ 存的是设备专属 EFS/NV 备份（短信 CS 域必需），删了就没了。
+rm -f "firmware/$MODEL"/*.xz
 mkdir -p "firmware/$MODEL"
 n=0
 for f in "$TMP/raw"/*; do
