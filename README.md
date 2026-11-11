@@ -256,5 +256,5 @@ jz02 与 jz02+`force=1` 一根 GPIO 都不碰、`enabled=0` 完全不动。
 ## 相关仓库
 
 - [xuxin1955/Actions](https://github.com/xuxin1955/Actions) — msm89xx target 本体与 files-8916
-- [zhoufla/SMSRelay8916](https://github.com/zhoufla/SMSRelay8916)（`openwrt` 分支）— 短信网关
+- [zhoufla/SMSRelay8916](https://github.com/zhoufla/SMSRelay8916)（`openwrt` 分支；`main` 为 Debian 版）— 短信网关
 - [lkiuyu/qcom-firmware](https://github.com/lkiuyu/qcom-firmware) — 各机型原厂 modem 分区 dump（内置基带的来源）

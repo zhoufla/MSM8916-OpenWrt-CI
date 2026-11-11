@@ -33,6 +33,8 @@ on:
 # 缓存 key 也引用它，升级上游只需改这一行。
 env:
   IMMORTALWRT_REF: 89f1ef18c888f841633f19f92655ee4b7f7716a4
+  # SMSRelay8916 的 main 是 Debian 版；OpenWrt 固件必须从 openwrt 分支取包定义。
+  SMSRELAY_REF: openwrt
 
 concurrency:
   group: build-${{ github.ref }}
